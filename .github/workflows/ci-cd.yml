@@ -14,7 +14,7 @@
 #      pull_request_review APPROVED em PR -> main       -> PRODUCAO
 #      workflow_dispatch                                 -> manual
 #
-#  Detecao de tecnologia/versao via `jenkins.properties` na raiz do repo.
+#  Detecao de tecnologia/versao via `.github/pipeline.yml` no repo.
 #  Em multirepo o Dockerfile da raiz e IGNORADO; usa-se sempre
 #  infra/docker/{api,web}/Dockerfile.
 # =====================================================================
@@ -57,10 +57,10 @@ env:
 
 jobs:
   # ===================================================================
-  # 1. SETUP - le jenkins.properties e monta a matrix
+  # 1. SETUP - le .github/pipeline.yml e monta a matrix
   # ===================================================================
   setup:
-    name: Setup • parse jenkins.properties
+    name: Setup • parse .github/pipeline.yml
     runs-on: ubuntu-latest
     if: |
       github.event_name == 'push' ||
