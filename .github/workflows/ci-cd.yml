@@ -110,66 +110,80 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Parse jenkins.properties -> matrix
+      - name: Parse .github/pipeline.yml -> matrix
         id: props
         shell: bash
         env:
           DEFAULT_PYTHON: ${{ env.DEFAULT_PYTHON }}
         run: |
           set -euo pipefail
-          [ -f jenkins.properties ] || { echo "::error::jenkins.properties nao encontrado na raiz"; exit 1; }
+          [ -f .github/pipeline.yml ] || { echo "::error::.github/pipeline.yml nao encontrado"; exit 1; }
 
-          getp() { grep -E "^${1}=" jenkins.properties | head -1 | cut -d'=' -f2- | tr -d '\r' || true; }
+          python3 - <<'PY'
+          import yaml, json, os, sys
 
-          MONO=$(getp "monorepo"); MONO=${MONO:-false}
-          echo "monorepo=$MONO" >> "$GITHUB_OUTPUT"
+          cfg  = yaml.safe_load(open('.github/pipeline.yml'))
+          out  = open(os.environ['GITHUB_OUTPUT'], 'a')
+          dp   = os.environ.get('DEFAULT_PYTHON', '3.12')
 
-          ITEMS=()
-          add_item() {
-            ITEMS+=("{\"app\":\"$1\",\"componente\":\"$2\",\"tecnologia\":\"$3\",\"node\":\"$4\",\"jdk\":\"$5\",\"python\":\"$6\",\"context\":\"$7\",\"dockerfile\":\"$8\",\"version_file\":\"$9\"}")
-          }
-          version_file_for() {
-            case "$1" in
-              spring-boot-java|java) echo "${2}/pom.xml" ;;
-              python)                echo "${2}/pyproject.toml" ;;
-              *)                     echo "${2}/package.json" ;;
-            esac
-          }
+          def g(d, *keys, default=''):
+              for k in keys:
+                  d = (d or {}).get(k)
+                  if d is None:
+                      return default
+              return str(d) if d is not None else default
 
-          if [ "$MONO" = "true" ]; then
-            for app in api web; do
-              COMP=$(getp "${app}.componente"); TEC=$(getp "${app}.tecnologia")
-              NODE=$(getp "${app}.node");      JDK=$(getp  "${app}.jdk")
-              PY=$(getp   "${app}.python")
-              [ -z "$COMP" ] && continue
-              [ -z "$TEC"  ] && continue
-              CTX="apps/${app}"
-              DF="infra/docker/${app}/Dockerfile"
-              [ -f "$DF" ] || { echo "::error::$DF nao existe"; exit 1; }
-              VF=$(version_file_for "$TEC" "apps/${app}"); VF="${VF#./}"
-              add_item "$app" "$COMP" "$TEC" "$NODE" "$JDK" "${PY:-$DEFAULT_PYTHON}" "$CTX" "$DF" "$VF"
-            done
-          else
-            COMP=$(getp "componente"); TEC=$(getp "tecnologia")
-            NODE=$(getp "node");      JDK=$(getp  "jdk")
-            PY=$(getp   "python")
-            [ -z "$COMP" ] && { echo "::error::componente ausente"; exit 1; }
-            [ -z "$TEC"  ] && { echo "::error::tecnologia ausente"; exit 1; }
-            APP=""
-            if   [ -f "infra/docker/api/Dockerfile" ]; then APP="api"
-            elif [ -f "infra/docker/web/Dockerfile" ]; then APP="web"
-            else echo "::error::Dockerfile nao encontrado em infra/docker/{api,web}/Dockerfile"; exit 1
-            fi
-            CTX="."
-            DF="infra/docker/${APP}/Dockerfile"
-            VF=$(version_file_for "$TEC" "."); VF="${VF#./}"
-            add_item "$APP" "$COMP" "$TEC" "$NODE" "$JDK" "${PY:-$DEFAULT_PYTHON}" "$CTX" "$DF" "$VF"
-          fi
+          def version_file(tec, base):
+              m = {'spring-boot-java': 'pom.xml', 'java': 'pom.xml', 'python': 'pyproject.toml'}
+              f = m.get(tec, 'package.json')
+              return f'{base}/{f}'.lstrip('./')
 
-          [ "${#ITEMS[@]}" -gt 0 ] || { echo "::error::nenhum componente derivado"; exit 1; }
-          MATRIX="{\"include\":[$(IFS=,; echo "${ITEMS[*]}")]}"
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "$MATRIX" | python3 -m json.tool
+          mono = str(cfg.get('monorepo', False)).lower() == 'true'
+          out.write(f"monorepo={'true' if mono else 'false'}\n")
+
+          items = []
+
+          if mono:
+              for app in ('api', 'web'):
+                  sub  = cfg.get(app) or {}
+                  comp = g(sub, 'componente')
+                  tec  = g(sub, 'tecnologia')
+                  if not comp or not tec:
+                      continue
+                  df = f'infra/docker/{app}/Dockerfile'
+                  if not os.path.isfile(df):
+                      print(f'::error::{df} nao existe', file=sys.stderr); sys.exit(1)
+                  items.append({
+                      'app': app, 'componente': comp, 'tecnologia': tec,
+                      'node': g(sub,'node'), 'jdk': g(sub,'jdk'),
+                      'python': g(sub,'python') or dp,
+                      'context': f'apps/{app}', 'dockerfile': df,
+                      'version_file': version_file(tec, f'apps/{app}'),
+                  })
+          else:
+              comp = g(cfg, 'componente')
+              tec  = g(cfg, 'tecnologia')
+              if not comp: print('::error::componente ausente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+              if not tec:  print('::error::tecnologia ausente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+              app = 'api' if os.path.isfile('infra/docker/api/Dockerfile') else \
+                    'web' if os.path.isfile('infra/docker/web/Dockerfile') else None
+              if not app:
+                  print('::error::Dockerfile nao encontrado em infra/docker/{api,web}/Dockerfile', file=sys.stderr); sys.exit(1)
+              items.append({
+                  'app': app, 'componente': comp, 'tecnologia': tec,
+                  'node': g(cfg,'node'), 'jdk': g(cfg,'jdk'),
+                  'python': g(cfg,'python') or dp,
+                  'context': '.', 'dockerfile': f'infra/docker/{app}/Dockerfile',
+                  'version_file': version_file(tec, '.'),
+              })
+
+          if not items:
+              print('::error::nenhum componente derivado de .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+
+          matrix = json.dumps({'include': items})
+          out.write(f'matrix={matrix}\n')
+          print(json.dumps({'include': items}, indent=2))
+          PY
 
   # ===================================================================
   # 2. BUILD
