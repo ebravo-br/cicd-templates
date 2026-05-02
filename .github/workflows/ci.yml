@@ -1,0 +1,167 @@
+# =====================================================================
+#  CI - REUSABLE WORKFLOW (Build only — sem Docker, sem ECR)
+#
+#  Este arquivo vive em:
+#      ebravo-br/cicd-templates/.github/workflows/ci.yml
+#
+#  Invocado pelo stub de cada repo via:
+#      jobs.ci.uses: ebravo-br/cicd-templates/.github/workflows/ci.yml@v1
+#
+#  Triggers (do CALLER):
+#      push em feature/** | hotfix/** | bugfix/**  -> valida o build
+#
+#  Nao gera imagem Docker nem faz push para o ECR.
+#  Para deploy use cd.yml.
+# =====================================================================
+
+name: CI - Reusable (Build)
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+env:
+  DEFAULT_NODE:   '20'
+  DEFAULT_JDK:    '17'
+  DEFAULT_PYTHON: '3.12'
+
+jobs:
+  # ===================================================================
+  # 1. SETUP — le .github/pipeline.yml e monta a matrix
+  # ===================================================================
+  setup:
+    name: Setup • parse .github/pipeline.yml
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.props.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse .github/pipeline.yml -> matrix
+        id: props
+        shell: bash
+        env:
+          DEFAULT_PYTHON: ${{ env.DEFAULT_PYTHON }}
+        run: |
+          set -euo pipefail
+          [ -f .github/pipeline.yml ] || { echo "::error::.github/pipeline.yml nao encontrado"; exit 1; }
+
+          python3 - <<'PY'
+          import yaml, json, os, sys
+
+          cfg = yaml.safe_load(open('.github/pipeline.yml'))
+          out = open(os.environ['GITHUB_OUTPUT'], 'a')
+          dp  = os.environ.get('DEFAULT_PYTHON', '3.12')
+
+          def g(d, *keys, default=''):
+              for k in keys:
+                  d = (d or {}).get(k)
+                  if d is None:
+                      return default
+              return str(d) if d is not None else default
+
+          mono  = str(cfg.get('monorepo', False)).lower() == 'true'
+          items = []
+
+          if mono:
+              for app in ('api', 'web'):
+                  sub  = cfg.get(app) or {}
+                  comp = g(sub, 'componente')
+                  tec  = g(sub, 'tecnologia')
+                  if not comp or not tec:
+                      continue
+                  items.append({
+                      'app': app, 'componente': comp, 'tecnologia': tec,
+                      'node': g(sub,'node'), 'jdk': g(sub,'jdk'),
+                      'python': g(sub,'python') or dp,
+                      'context': f'apps/{app}',
+                  })
+          else:
+              comp = g(cfg, 'componente')
+              tec  = g(cfg, 'tecnologia')
+              if not comp: print('::error::componente ausente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+              if not tec:  print('::error::tecnologia ausente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+              items.append({
+                  'app': 'main', 'componente': comp, 'tecnologia': tec,
+                  'node': g(cfg,'node'), 'jdk': g(cfg,'jdk'),
+                  'python': g(cfg,'python') or dp,
+                  'context': '.',
+              })
+
+          if not items:
+              print('::error::nenhum componente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+
+          out.write(f"matrix={json.dumps({'include': items})}\n")
+          print(json.dumps({'include': items}, indent=2))
+          PY
+
+  # ===================================================================
+  # 2. BUILD — compila e valida (sem Docker, sem ECR)
+  # ===================================================================
+  build:
+    name: Build • ${{ matrix.componente }} (${{ matrix.tecnologia }})
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Node / Next.js / Angular ------------------------------------
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        id: nodever
+        run: |
+          NV="${{ matrix.node }}"; NV="${NV#node}"
+          echo "v=${NV:-${{ env.DEFAULT_NODE }}}" >> "$GITHUB_OUTPUT"
+
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.nodever.outputs.v }}
+
+      - name: NPM install + build
+        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
+          else                              npm install --legacy-peer-deps; fi
+          npm run build --if-present
+
+      # ---- Java --------------------------------------------------------
+      - if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        id: jdkver
+        run: |
+          JV="${{ matrix.jdk }}"; JV="${JV#jdk}"
+          echo "v=${JV:-${{ env.DEFAULT_JDK }}}" >> "$GITHUB_OUTPUT"
+
+      - if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ steps.jdkver.outputs.v }}
+          cache: maven
+
+      - name: Maven package
+        if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -x ./mvnw ]; then ./mvnw -B -DskipTests clean package
+          else                  mvn   -B -DskipTests clean package; fi
+
+      # ---- Python ------------------------------------------------------
+      - if: matrix.tecnologia == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Build Python
+        if: matrix.tecnologia == 'python'
+        working-directory: ${{ matrix.context }}
+        run: |
+          python -m pip install --upgrade pip
+          [ -f requirements.txt ] && pip install -r requirements.txt || true
+          if [ -f pyproject.toml ]; then pip install build && python -m build; fi

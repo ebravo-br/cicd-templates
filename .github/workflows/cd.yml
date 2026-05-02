@@ -1,44 +1,35 @@
 # =====================================================================
-#  CI/CD - REUSABLE WORKFLOW (Mono/Multi-repo, ECR + EC2)
+#  CD - REUSABLE WORKFLOW (Build + ECR + Deploy SSH)
 #
 #  Este arquivo vive em:
-#      ebravo-br/cicd-templates/.github/workflows/ci-cd.yml
+#      ebravo-br/cicd-templates/.github/workflows/cd.yml
 #
-#  E e invocado pelos repos de projeto via:
-#      jobs.cicd.uses: ebravo-br/cicd-templates/.github/workflows/ci-cd.yml@v1
+#  Invocado pelo stub de cada repo via:
+#      jobs.cd.uses: ebravo-br/cicd-templates/.github/workflows/cd.yml@v1
 #
-#  -> Ponto unico de manutencao. PR no repo central, tag v1/v2, etc.
+#  Trigger: apenas workflow_dispatch (gate manual — deploy e sempre intencional).
 #
-#  Triggers (do CALLER):
-#      push em feature/** | hotfix/** | bugfix/**       -> HOMOLOGACAO
-#      pull_request_review APPROVED em PR -> main       -> PRODUCAO
-#      workflow_dispatch                                 -> manual
-#
-#  Detecao de tecnologia/versao via `.github/pipeline.yml` no repo.
-#  Em multirepo o Dockerfile da raiz e IGNORADO; usa-se sempre
-#  infra/docker/{api,web}/Dockerfile.
+#  Realiza em sequencia por componente (max-parallel: 1):
+#    1. Build (compile/package)
+#    2. Bump de versao + commit [skip ci]
+#    3. Build e push da imagem Docker -> ECR
+#    4. Deploy SSH -> EC2
 # =====================================================================
 
-name: CI/CD - Reusable (Mono/Multi-repo, ECR + EC2)
+name: CD - Reusable (Build + ECR + Deploy)
 
 on:
   workflow_call:
     inputs:
       target_env:
-        description: 'Ambiente alvo. Vazio = deduzir do trigger.'
+        description: 'homologacao | producao'
         type: string
-        required: false
-        default: ''
+        required: true
       deploy_platform:
-        description: 'Plataforma de deploy. ec2 (ativo) | ecs | gke (futuros).'
+        description: 'ec2 (ativo) | ecs | gke (futuros)'
         type: string
         required: false
-        default: 'ec2'
-      confirm_deploy:
-        description: 'Confirmar deploy? Marque true para executar o deploy apos o build.'
-        type: boolean
-        required: false
-        default: false
+        default: ec2
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -50,50 +41,27 @@ on:
         required: true
 
 permissions:
-  contents: write          # commit do bump de versao na branch do projeto
-  id-token: write          # OIDC AWS (opcional)
+  contents: write
+  id-token: write
   pull-requests: write
 
 env:
-  AWS_REGION: sa-east-1
-  DEFAULT_NODE: '20'
-  DEFAULT_JDK:  '17'
+  AWS_REGION:     sa-east-1
+  DEFAULT_NODE:   '20'
+  DEFAULT_JDK:    '17'
   DEFAULT_PYTHON: '3.12'
 
 jobs:
   # ===================================================================
-  # 1. SETUP - le .github/pipeline.yml e monta a matrix
+  # 1. SETUP — le .github/pipeline.yml e monta a matrix
   # ===================================================================
   setup:
     name: Setup • parse .github/pipeline.yml
     runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_review' &&
-       github.event.review.state == 'approved' &&
-       github.event.pull_request.base.ref == 'main' &&
-       (startsWith(github.event.pull_request.head.ref, 'feature/') ||
-        startsWith(github.event.pull_request.head.ref, 'hotfix/') ||
-        startsWith(github.event.pull_request.head.ref, 'bugfix/')))
     outputs:
-      target_env:      ${{ steps.env.outputs.target_env }}
-      monorepo:        ${{ steps.props.outputs.monorepo }}
-      matrix:          ${{ steps.props.outputs.matrix }}
-      ref:             ${{ steps.ref.outputs.ref }}
-      deploy_platform: ${{ steps.platform.outputs.platform }}
+      matrix: ${{ steps.props.outputs.matrix }}
+      ref:    ${{ steps.ref.outputs.ref }}
     steps:
-      - name: Definir ambiente alvo
-        id: env
-        run: |
-          if [ -n "${{ inputs.target_env }}" ]; then
-            echo "target_env=${{ inputs.target_env }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
-            echo "target_env=producao"     >> "$GITHUB_OUTPUT"
-          else
-            echo "target_env=homologacao"  >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Definir ref de checkout
         id: ref
         run: |
@@ -103,17 +71,9 @@ jobs:
             echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Definir plataforma de deploy
-        id: platform
-        run: |
-          P="${{ inputs.deploy_platform }}"
-          echo "platform=${P:-ec2}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.ref.outputs.ref }}
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Parse .github/pipeline.yml -> matrix
         id: props
@@ -127,9 +87,9 @@ jobs:
           python3 - <<'PY'
           import yaml, json, os, sys
 
-          cfg  = yaml.safe_load(open('.github/pipeline.yml'))
-          out  = open(os.environ['GITHUB_OUTPUT'], 'a')
-          dp   = os.environ.get('DEFAULT_PYTHON', '3.12')
+          cfg = yaml.safe_load(open('.github/pipeline.yml'))
+          out = open(os.environ['GITHUB_OUTPUT'], 'a')
+          dp  = os.environ.get('DEFAULT_PYTHON', '3.12')
 
           def g(d, *keys, default=''):
               for k in keys:
@@ -143,9 +103,7 @@ jobs:
               f = m.get(tec, 'package.json')
               return f'{base}/{f}'.lstrip('./')
 
-          mono = str(cfg.get('monorepo', False)).lower() == 'true'
-          out.write(f"monorepo={'true' if mono else 'false'}\n")
-
+          mono  = str(cfg.get('monorepo', False)).lower() == 'true'
           items = []
 
           if mono:
@@ -183,29 +141,38 @@ jobs:
               })
 
           if not items:
-              print('::error::nenhum componente derivado de .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+              print('::error::nenhum componente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
 
-          matrix = json.dumps({'include': items})
-          out.write(f'matrix={matrix}\n')
+          out.write(f"matrix={json.dumps({'include': items})}\n")
           print(json.dumps({'include': items}, indent=2))
           PY
 
   # ===================================================================
-  # 2. BUILD
+  # 2. DEPLOY — build + bump + ECR + SSH (um componente por vez)
   # ===================================================================
-  build:
-    name: Build • ${{ matrix.componente }} (${{ matrix.tecnologia }})
+  deploy:
+    name: Deploy ${{ inputs.target_env }} • ${{ matrix.componente }}
     needs: setup
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    environment:
+      name: ${{ inputs.target_env }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.setup.outputs.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---- Node / Next.js / React / Angular ----
+      - name: Configurar identidade Git
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      # ---- Toolchain --------------------------------------------------
       - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
         id: nodever
         run: |
@@ -217,21 +184,6 @@ jobs:
         with:
           node-version: ${{ steps.nodever.outputs.v }}
 
-      - name: NPM install + build
-        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
-        working-directory: ${{ matrix.context }}
-        run: |
-          if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
-          else                              npm install --legacy-peer-deps; fi
-          if   npm run | grep -qE '^\s+build-homol' && [ "${{ needs.setup.outputs.target_env }}" = "homologacao" ]; then
-            npm run build-homol
-          elif npm run | grep -qE '^\s+build-prod'  && [ "${{ needs.setup.outputs.target_env }}" = "producao"    ]; then
-            npm run build-prod
-          else
-            npm run build --if-present
-          fi
-
-      # ---- Java ----
       - if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
         id: jdkver
         run: |
@@ -241,25 +193,39 @@ jobs:
       - if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: ${{ steps.jdkver.outputs.v }}
           cache: maven
 
-      - name: Maven package
-        if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
-        working-directory: ${{ matrix.context }}
-        run: |
-          if [ -x ./mvnw ]; then ./mvnw -B -DskipTests clean package
-          else                  mvn   -B -DskipTests clean package; fi
-
-      # ---- Python ----
       - if: matrix.tecnologia == 'python'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
           cache: pip
 
-      - name: Build Python
+      # ---- Build ------------------------------------------------------
+      - name: Build — Node.js / Angular
+        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
+          else                              npm install --legacy-peer-deps; fi
+          if   npm run | grep -qE '^\s+build-homol' && [ "${{ inputs.target_env }}" = "homologacao" ]; then
+            npm run build-homol
+          elif npm run | grep -qE '^\s+build-prod'  && [ "${{ inputs.target_env }}" = "producao"    ]; then
+            npm run build-prod
+          else
+            npm run build --if-present
+          fi
+
+      - name: Build — Maven
+        if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -x ./mvnw ]; then ./mvnw -B -DskipTests clean package
+          else                  mvn   -B -DskipTests clean package; fi
+
+      - name: Build — Python
         if: matrix.tecnologia == 'python'
         working-directory: ${{ matrix.context }}
         run: |
@@ -267,64 +233,13 @@ jobs:
           [ -f requirements.txt ] && pip install -r requirements.txt || true
           if [ -f pyproject.toml ]; then pip install build && python -m build; fi
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ matrix.app }}-${{ matrix.componente }}
-          path: |
-            ${{ matrix.context }}/dist
-            ${{ matrix.context }}/build
-            ${{ matrix.context }}/target
-            ${{ matrix.context }}/.next
-          if-no-files-found: ignore
-          retention-days: 1
-
-      - name: Instrucoes de deploy
-        if: ${{ !inputs.confirm_deploy }}
-        run: |
-          {
-            echo "### Build concluido — deploy pendente de confirmacao"
-            echo ""
-            echo "Para fazer o deploy, re-execute este workflow manualmente com:"
-            echo "- **Confirmar deploy**: \`true\`"
-            echo "- **Ambiente**: \`${{ needs.setup.outputs.target_env }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # ===================================================================
-  # 3. DEPLOY - gate manual + bump + ECR + SSH EC2
-  # ===================================================================
-  deploy:
-    name: Deploy ${{ needs.setup.outputs.target_env }} • ${{ matrix.componente }}
-    needs: [setup, build]
-    if: ${{ inputs.confirm_deploy == true }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
-    environment:
-      name: ${{ needs.setup.outputs.target_env }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.setup.outputs.ref }}
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-${{ matrix.app }}-${{ matrix.componente }}
-          path: ${{ matrix.context }}
-
-      - run: |
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
+      # ---- Bump de versao ---------------------------------------------
       - name: Calcular nova versao
         id: ver
         env:
           VERSION_FILE: ${{ matrix.version_file }}
-          TEC: ${{ matrix.tecnologia }}
-          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+          TEC:          ${{ matrix.tecnologia }}
+          ENV_TARGET:   ${{ inputs.target_env }}
         run: |
           set -euo pipefail
           STAMP=$(TZ=America/Sao_Paulo date +'%d%m%y%H%M%S')
@@ -338,7 +253,7 @@ jobs:
             NEW="${BASE}-SNAPSHOT_${STAMP}"
           else
             IFS='.' read -r A B C <<<"$BASE"
-            B=$((B+1)); NEW="${A}.${B}.0"
+            NEW="${A}.$((B+1)).0"
           fi
           echo "current=$CUR" >> "$GITHUB_OUTPUT"
           echo "new=$NEW"     >> "$GITHUB_OUTPUT"
@@ -347,8 +262,8 @@ jobs:
       - name: Atualizar arquivo de versao
         env:
           VERSION_FILE: ${{ matrix.version_file }}
-          TEC: ${{ matrix.tecnologia }}
-          NEW: ${{ steps.ver.outputs.new }}
+          TEC:          ${{ matrix.tecnologia }}
+          NEW:          ${{ steps.ver.outputs.new }}
         run: |
           set -euo pipefail
           case "$TEC" in
@@ -371,6 +286,7 @@ jobs:
               ;;
           esac
 
+      # ---- ECR --------------------------------------------------------
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -382,12 +298,12 @@ jobs:
 
       - name: Build & Push imagem -> ECR
         env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
-          REPO: ${{ matrix.componente }}
-          NEW: ${{ steps.ver.outputs.new }}
-          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+          REGISTRY:   ${{ steps.ecr.outputs.registry }}
+          REPO:       ${{ matrix.componente }}
+          NEW:        ${{ steps.ver.outputs.new }}
+          ENV_TARGET: ${{ inputs.target_env }}
           DOCKERFILE: ${{ matrix.dockerfile }}
-          CONTEXT: ${{ matrix.context }}
+          CONTEXT:    ${{ matrix.context }}
         run: |
           set -euo pipefail
           aws ecr describe-repositories --repository-names "$REPO" >/dev/null 2>&1 \
@@ -401,12 +317,13 @@ jobs:
           fi
           echo "IMAGE_URI=$IMG" >> "$GITHUB_ENV"
 
+      # ---- Commit do bump ---------------------------------------------
       - name: Commit do bump na branch
         env:
-          NEW: ${{ steps.ver.outputs.new }}
-          REF: ${{ needs.setup.outputs.ref }}
+          NEW:          ${{ steps.ver.outputs.new }}
+          REF:          ${{ needs.setup.outputs.ref }}
           VERSION_FILE: ${{ matrix.version_file }}
-          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+          ENV_TARGET:   ${{ inputs.target_env }}
         run: |
           set -euo pipefail
           git fetch origin "$REF"
@@ -438,11 +355,12 @@ jobs:
             git pull --rebase origin "$REF"
           done
 
+      # ---- Deploy SSH -------------------------------------------------
       - name: Configurar chave SSH
         env:
-          KEY_HOMOL: ${{ secrets.SSH_KEY_HOMOL }}
-          KEY_PROD:  ${{ secrets.SSH_KEY_PROD }}
-          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+          KEY_HOMOL:  ${{ secrets.SSH_KEY_HOMOL }}
+          KEY_PROD:   ${{ secrets.SSH_KEY_PROD }}
+          ENV_TARGET: ${{ inputs.target_env }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           if [ "$ENV_TARGET" = "producao" ]; then
@@ -453,11 +371,11 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
 
       - name: Deploy via SSH (EC2)
-        if: needs.setup.outputs.deploy_platform == 'ec2'
+        if: inputs.deploy_platform == 'ec2'
         env:
-          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
-          COMP: ${{ matrix.componente }}
-          NEW:  ${{ steps.ver.outputs.new }}
+          ENV_TARGET: ${{ inputs.target_env }}
+          COMP:       ${{ matrix.componente }}
+          NEW:        ${{ steps.ver.outputs.new }}
         run: |
           set -euo pipefail
           if [ "$ENV_TARGET" = "producao" ]; then
@@ -470,19 +388,17 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
             "$SCRIPT $COMP $NEW"
 
-      # Futuros destinos (DESATIVADOS)
       - name: Deploy ECS  (desativado)
-        if: needs.setup.outputs.deploy_platform == 'ecs'
+        if: inputs.deploy_platform == 'ecs'
         run: |
           echo "::warning::Deploy ECS ainda nao habilitado."
           # aws ecs update-service --cluster <C> --service ${{ matrix.componente }} --force-new-deployment
           exit 0
 
       - name: Deploy GKE  (desativado)
-        if: needs.setup.outputs.deploy_platform == 'gke'
+        if: inputs.deploy_platform == 'gke'
         run: |
           echo "::warning::Deploy GKE ainda nao habilitado."
-          # gcloud container clusters get-credentials <CLUSTER> --region <REGION>
           # kubectl set image deployment/${{ matrix.componente }} ${{ matrix.componente }}=${IMAGE_URI}
           exit 0
 
@@ -490,10 +406,10 @@ jobs:
         if: always()
         run: |
           {
-            echo "### Deploy ${{ needs.setup.outputs.target_env }}"
+            echo "### Deploy ${{ inputs.target_env }}"
             echo ""
             echo "- componente: \`${{ matrix.componente }}\`"
             echo "- versao:     \`${{ steps.ver.outputs.new }}\`"
             echo "- imagem:     \`${IMAGE_URI:-n/a}\`"
-            echo "- plataforma: \`${{ needs.setup.outputs.deploy_platform }}\`"
+            echo "- plataforma: \`${{ inputs.deploy_platform }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
