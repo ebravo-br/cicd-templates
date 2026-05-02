@@ -437,7 +437,7 @@ jobs:
             SCRIPT="/home/ubuntu/deploy/deploy.sh"
           fi
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
-            "$SCRIPT ${COMP}.properties $NEW"
+            "$SCRIPT $COMP $NEW"
 
       # Futuros destinos (DESATIVADOS)
       - name: Deploy ECS  (desativado)
