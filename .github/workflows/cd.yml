@@ -53,10 +53,35 @@ env:
 
 jobs:
   # ===================================================================
+  # 0. CHECK-PERMISSION — bloqueia deploy em producao se nao autorizado
+  # ===================================================================
+  check-permission:
+    name: Verificar permissao
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bloquear deploy em producao para usuarios nao autorizados
+        if: inputs.target_env == 'producao'
+        env:
+          ACTOR:   ${{ github.actor }}
+          ALLOWED: ${{ vars.DEPLOY_PROD_ALLOWED }}
+        run: |
+          if [ -z "$ALLOWED" ]; then
+            echo "::error::Variavel DEPLOY_PROD_ALLOWED nao configurada na org. Contate o administrador."
+            exit 1
+          fi
+          if echo " $ALLOWED " | grep -qw "$ACTOR"; then
+            echo "::notice::Permissao concedida: $ACTOR pode fazer deploy em producao."
+          else
+            echo "::error::Usuario '$ACTOR' nao tem permissao para deploy em producao. Lista de autorizados: $ALLOWED"
+            exit 1
+          fi
+
+  # ===================================================================
   # 1. SETUP — le .github/pipeline.yml e monta a matrix
   # ===================================================================
   setup:
     name: Setup • parse .github/pipeline.yml
+    needs: check-permission
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.props.outputs.matrix }}
@@ -152,7 +177,7 @@ jobs:
   # ===================================================================
   deploy:
     name: Deploy ${{ inputs.target_env }} • ${{ matrix.componente }}
-    needs: setup
+    needs: [check-permission, setup]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
