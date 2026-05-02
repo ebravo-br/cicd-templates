@@ -1,0 +1,468 @@
+# =====================================================================
+#  CI/CD - REUSABLE WORKFLOW (Mono/Multi-repo, ECR + EC2)
+#
+#  Este arquivo vive em:
+#      ebravo-br/cicd-templates/.github/workflows/ci-cd.yml
+#
+#  E e invocado pelos repos de projeto via:
+#      jobs.cicd.uses: ebravo-br/cicd-templates/.github/workflows/ci-cd.yml@v1
+#
+#  -> Ponto unico de manutencao. PR no repo central, tag v1/v2, etc.
+#
+#  Triggers (do CALLER):
+#      push em feature/** | hotfix/** | bugfix/**       -> HOMOLOGACAO
+#      pull_request_review APPROVED em PR -> main       -> PRODUCAO
+#      workflow_dispatch                                 -> manual
+#
+#  Detecao de tecnologia/versao via `jenkins.properties` na raiz do repo.
+#  Em multirepo o Dockerfile da raiz e IGNORADO; usa-se sempre
+#  infra/docker/{api,web}/Dockerfile.
+# =====================================================================
+
+name: CI/CD - Reusable (Mono/Multi-repo, ECR + EC2)
+
+on:
+  workflow_call:
+    inputs:
+      target_env:
+        description: 'Ambiente alvo. Vazio = deduzir do trigger.'
+        type: string
+        required: false
+        default: ''
+      deploy_platform:
+        description: 'Plataforma de deploy. ec2 (ativo) | ecs | gke (futuros).'
+        type: string
+        required: false
+        default: 'ec2'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      SSH_KEY_HOMOL:
+        required: true
+      SSH_KEY_PROD:
+        required: true
+
+permissions:
+  contents: write          # commit do bump de versao na branch do projeto
+  id-token: write          # OIDC AWS (opcional)
+  pull-requests: write
+
+env:
+  AWS_REGION: sa-east-1
+  DEFAULT_NODE: '20'
+  DEFAULT_JDK:  '17'
+  DEFAULT_PYTHON: '3.12'
+
+jobs:
+  # ===================================================================
+  # 1. SETUP - le jenkins.properties e monta a matrix
+  # ===================================================================
+  setup:
+    name: Setup • parse jenkins.properties
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
+       github.event.pull_request.base.ref == 'main' &&
+       (startsWith(github.event.pull_request.head.ref, 'feature/') ||
+        startsWith(github.event.pull_request.head.ref, 'hotfix/') ||
+        startsWith(github.event.pull_request.head.ref, 'bugfix/')))
+    outputs:
+      target_env:      ${{ steps.env.outputs.target_env }}
+      monorepo:        ${{ steps.props.outputs.monorepo }}
+      matrix:          ${{ steps.props.outputs.matrix }}
+      ref:             ${{ steps.ref.outputs.ref }}
+      deploy_platform: ${{ steps.platform.outputs.platform }}
+    steps:
+      - name: Definir ambiente alvo
+        id: env
+        run: |
+          if [ -n "${{ inputs.target_env }}" ]; then
+            echo "target_env=${{ inputs.target_env }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            echo "target_env=producao"     >> "$GITHUB_OUTPUT"
+          else
+            echo "target_env=homologacao"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Definir ref de checkout
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            echo "ref=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Definir plataforma de deploy
+        id: platform
+        run: |
+          P="${{ inputs.deploy_platform }}"
+          echo "platform=${P:-ec2}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse jenkins.properties -> matrix
+        id: props
+        shell: bash
+        env:
+          DEFAULT_PYTHON: ${{ env.DEFAULT_PYTHON }}
+        run: |
+          set -euo pipefail
+          [ -f jenkins.properties ] || { echo "::error::jenkins.properties nao encontrado na raiz"; exit 1; }
+
+          getp() { grep -E "^${1}=" jenkins.properties | head -1 | cut -d'=' -f2- | tr -d '\r' || true; }
+
+          MONO=$(getp "monorepo"); MONO=${MONO:-false}
+          echo "monorepo=$MONO" >> "$GITHUB_OUTPUT"
+
+          ITEMS=()
+          add_item() {
+            ITEMS+=("{\"app\":\"$1\",\"componente\":\"$2\",\"tecnologia\":\"$3\",\"node\":\"$4\",\"jdk\":\"$5\",\"python\":\"$6\",\"context\":\"$7\",\"dockerfile\":\"$8\",\"version_file\":\"$9\"}")
+          }
+          version_file_for() {
+            case "$1" in
+              spring-boot-java|java) echo "${2}/pom.xml" ;;
+              python)                echo "${2}/pyproject.toml" ;;
+              *)                     echo "${2}/package.json" ;;
+            esac
+          }
+
+          if [ "$MONO" = "true" ]; then
+            for app in api web; do
+              COMP=$(getp "${app}.componente"); TEC=$(getp "${app}.tecnologia")
+              NODE=$(getp "${app}.node");      JDK=$(getp  "${app}.jdk")
+              PY=$(getp   "${app}.python")
+              [ -z "$COMP" ] && continue
+              [ -z "$TEC"  ] && continue
+              CTX="apps/${app}"
+              DF="infra/docker/${app}/Dockerfile"
+              [ -f "$DF" ] || { echo "::error::$DF nao existe"; exit 1; }
+              VF=$(version_file_for "$TEC" "apps/${app}"); VF="${VF#./}"
+              add_item "$app" "$COMP" "$TEC" "$NODE" "$JDK" "${PY:-$DEFAULT_PYTHON}" "$CTX" "$DF" "$VF"
+            done
+          else
+            COMP=$(getp "componente"); TEC=$(getp "tecnologia")
+            NODE=$(getp "node");      JDK=$(getp  "jdk")
+            PY=$(getp   "python")
+            [ -z "$COMP" ] && { echo "::error::componente ausente"; exit 1; }
+            [ -z "$TEC"  ] && { echo "::error::tecnologia ausente"; exit 1; }
+            APP=""
+            if   [ -f "infra/docker/api/Dockerfile" ]; then APP="api"
+            elif [ -f "infra/docker/web/Dockerfile" ]; then APP="web"
+            else echo "::error::Dockerfile nao encontrado em infra/docker/{api,web}/Dockerfile"; exit 1
+            fi
+            CTX="."
+            DF="infra/docker/${APP}/Dockerfile"
+            VF=$(version_file_for "$TEC" "."); VF="${VF#./}"
+            add_item "$APP" "$COMP" "$TEC" "$NODE" "$JDK" "${PY:-$DEFAULT_PYTHON}" "$CTX" "$DF" "$VF"
+          fi
+
+          [ "${#ITEMS[@]}" -gt 0 ] || { echo "::error::nenhum componente derivado"; exit 1; }
+          MATRIX="{\"include\":[$(IFS=,; echo "${ITEMS[*]}")]}"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "$MATRIX" | python3 -m json.tool
+
+  # ===================================================================
+  # 2. BUILD
+  # ===================================================================
+  build:
+    name: Build • ${{ matrix.componente }} (${{ matrix.tecnologia }})
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+
+      # ---- Node / Next.js / React / Angular ----
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        id: nodever
+        run: |
+          NV="${{ matrix.node }}"; NV="${NV#node}"
+          echo "v=${NV:-${{ env.DEFAULT_NODE }}}" >> "$GITHUB_OUTPUT"
+
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.nodever.outputs.v }}
+
+      - name: NPM install + build
+        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
+          else                              npm install --legacy-peer-deps; fi
+          if   npm run | grep -qE '^\s+build-homol' && [ "${{ needs.setup.outputs.target_env }}" = "homologacao" ]; then
+            npm run build-homol
+          elif npm run | grep -qE '^\s+build-prod'  && [ "${{ needs.setup.outputs.target_env }}" = "producao"    ]; then
+            npm run build-prod
+          else
+            npm run build --if-present
+          fi
+
+      # ---- Java ----
+      - if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        id: jdkver
+        run: |
+          JV="${{ matrix.jdk }}"; JV="${JV#jdk}"
+          echo "v=${JV:-${{ env.DEFAULT_JDK }}}" >> "$GITHUB_OUTPUT"
+
+      - if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ steps.jdkver.outputs.v }}
+          cache: maven
+
+      - name: Maven package
+        if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -x ./mvnw ]; then ./mvnw -B -DskipTests clean package
+          else                  mvn   -B -DskipTests clean package; fi
+
+      # ---- Python ----
+      - if: matrix.tecnologia == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Build Python
+        if: matrix.tecnologia == 'python'
+        working-directory: ${{ matrix.context }}
+        run: |
+          python -m pip install --upgrade pip
+          [ -f requirements.txt ] && pip install -r requirements.txt || true
+          if [ -f pyproject.toml ]; then pip install build && python -m build; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.app }}-${{ matrix.componente }}
+          path: |
+            ${{ matrix.context }}/dist
+            ${{ matrix.context }}/build
+            ${{ matrix.context }}/target
+            ${{ matrix.context }}/.next
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # ===================================================================
+  # 3. DEPLOY - gate manual + bump + ECR + SSH EC2
+  # ===================================================================
+  deploy:
+    name: Deploy ${{ needs.setup.outputs.target_env }} • ${{ matrix.componente }}
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    environment:
+      name: ${{ needs.setup.outputs.target_env }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.app }}-${{ matrix.componente }}
+          path: ${{ matrix.context }}
+
+      - run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Calcular nova versao
+        id: ver
+        env:
+          VERSION_FILE: ${{ matrix.version_file }}
+          TEC: ${{ matrix.tecnologia }}
+          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+        run: |
+          set -euo pipefail
+          STAMP=$(TZ=America/Sao_Paulo date +'%d%m%y%H%M%S')
+          case "$TEC" in
+            spring-boot-java|java) CUR=$(grep -m1 -oP '(?<=<version>)[^<]+' "$VERSION_FILE") ;;
+            python)                CUR=$(grep -m1 -oP '(?<=^version *= *")[^"]+' "$VERSION_FILE") ;;
+            *)                     CUR=$(node -p "require('./'+process.env.VERSION_FILE).version") ;;
+          esac
+          BASE=$(echo "$CUR" | sed -E 's/-SNAPSHOT_[0-9]+$//')
+          if [ "$ENV_TARGET" = "homologacao" ]; then
+            NEW="${BASE}-SNAPSHOT_${STAMP}"
+          else
+            IFS='.' read -r A B C <<<"$BASE"
+            B=$((B+1)); NEW="${A}.${B}.0"
+          fi
+          echo "current=$CUR" >> "$GITHUB_OUTPUT"
+          echo "new=$NEW"     >> "$GITHUB_OUTPUT"
+          echo "::notice::$VERSION_FILE  $CUR -> $NEW  ($ENV_TARGET)"
+
+      - name: Atualizar arquivo de versao
+        env:
+          VERSION_FILE: ${{ matrix.version_file }}
+          TEC: ${{ matrix.tecnologia }}
+          NEW: ${{ steps.ver.outputs.new }}
+        run: |
+          set -euo pipefail
+          case "$TEC" in
+            spring-boot-java|java)
+              python3 - <<'PY'
+          import os, re
+          fp = os.environ['VERSION_FILE']; new = os.environ['NEW']
+          src = open(fp).read()
+          src = re.sub(r'(<project[^>]*>.*?<version>)([^<]+)(</version>)',
+                       lambda m: m.group(1)+new+m.group(3),
+                       src, count=1, flags=re.DOTALL)
+          open(fp,'w').write(src)
+          PY
+              ;;
+            python)
+              sed -i -E "s/^version *= *\"[^\"]+\"/version = \"${NEW}\"/" "$VERSION_FILE"
+              ;;
+            *)
+              node -e "const fs=require('fs'),f=process.env.VERSION_FILE;const j=JSON.parse(fs.readFileSync(f));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
+              ;;
+          esac
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push imagem -> ECR
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPO: ${{ matrix.componente }}
+          NEW: ${{ steps.ver.outputs.new }}
+          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          CONTEXT: ${{ matrix.context }}
+        run: |
+          set -euo pipefail
+          aws ecr describe-repositories --repository-names "$REPO" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$REPO" --image-scanning-configuration scanOnPush=true >/dev/null
+          IMG="$REGISTRY/$REPO:$NEW"
+          docker build -f "$DOCKERFILE" -t "$IMG" "$CONTEXT"
+          docker push "$IMG"
+          if [ "$ENV_TARGET" = "producao" ]; then
+            docker tag  "$IMG" "$REGISTRY/$REPO:latest"
+            docker push "$REGISTRY/$REPO:latest"
+          fi
+          echo "IMAGE_URI=$IMG" >> "$GITHUB_ENV"
+
+      - name: Commit do bump na branch
+        env:
+          NEW: ${{ steps.ver.outputs.new }}
+          REF: ${{ needs.setup.outputs.ref }}
+          VERSION_FILE: ${{ matrix.version_file }}
+          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$REF"
+          git checkout -B "$REF" "origin/$REF"
+          case "${{ matrix.tecnologia }}" in
+            spring-boot-java|java)
+              python3 - <<'PY'
+          import os, re
+          fp = os.environ['VERSION_FILE']; new = os.environ['NEW']
+          src = open(fp).read()
+          src = re.sub(r'(<project[^>]*>.*?<version>)([^<]+)(</version>)',
+                       lambda m: m.group(1)+new+m.group(3),
+                       src, count=1, flags=re.DOTALL)
+          open(fp,'w').write(src)
+          PY
+              ;;
+            python)
+              sed -i -E "s/^version *= *\"[^\"]+\"/version = \"${NEW}\"/" "$VERSION_FILE"
+              ;;
+            *)
+              node -e "const fs=require('fs'),f=process.env.VERSION_FILE;const j=JSON.parse(fs.readFileSync(f));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
+              ;;
+          esac
+          git add "$VERSION_FILE"
+          if git diff --cached --quiet; then echo "Nada a commitar"; exit 0; fi
+          git commit -m "chore(release): bump $VERSION_FILE -> $NEW ($ENV_TARGET) [skip ci]"
+          for i in 1 2 3; do
+            git push origin "HEAD:$REF" && break
+            git pull --rebase origin "$REF"
+          done
+
+      - name: Configurar chave SSH
+        env:
+          KEY_HOMOL: ${{ secrets.SSH_KEY_HOMOL }}
+          KEY_PROD:  ${{ secrets.SSH_KEY_PROD }}
+          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          if [ "$ENV_TARGET" = "producao" ]; then
+            printf '%s\n' "$KEY_PROD"  > ~/.ssh/deploy_key
+          else
+            printf '%s\n' "$KEY_HOMOL" > ~/.ssh/deploy_key
+          fi
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Deploy via SSH (EC2)
+        if: needs.setup.outputs.deploy_platform == 'ec2'
+        env:
+          ENV_TARGET: ${{ needs.setup.outputs.target_env }}
+          COMP: ${{ matrix.componente }}
+          NEW:  ${{ steps.ver.outputs.new }}
+        run: |
+          set -euo pipefail
+          if [ "$ENV_TARGET" = "producao" ]; then
+            HOST="ec2-user@ec2-18-230-19-215.sa-east-1.compute.amazonaws.com"
+            SCRIPT="/home/ec2-user/deploy/deploy.sh"
+          else
+            HOST="ubuntu@54.232.76.143"
+            SCRIPT="/home/ubuntu/deploy/deploy.sh"
+          fi
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
+            "$SCRIPT ${COMP}.properties $NEW"
+
+      # Futuros destinos (DESATIVADOS)
+      - name: Deploy ECS  (desativado)
+        if: needs.setup.outputs.deploy_platform == 'ecs'
+        run: |
+          echo "::warning::Deploy ECS ainda nao habilitado."
+          # aws ecs update-service --cluster <C> --service ${{ matrix.componente }} --force-new-deployment
+          exit 0
+
+      - name: Deploy GKE  (desativado)
+        if: needs.setup.outputs.deploy_platform == 'gke'
+        run: |
+          echo "::warning::Deploy GKE ainda nao habilitado."
+          # gcloud container clusters get-credentials <CLUSTER> --region <REGION>
+          # kubectl set image deployment/${{ matrix.componente }} ${{ matrix.componente }}=${IMAGE_URI}
+          exit 0
+
+      - name: Resumo
+        if: always()
+        run: |
+          {
+            echo "### Deploy ${{ needs.setup.outputs.target_env }}"
+            echo ""
+            echo "- componente: \`${{ matrix.componente }}\`"
+            echo "- versao:     \`${{ steps.ver.outputs.new }}\`"
+            echo "- imagem:     \`${IMAGE_URI:-n/a}\`"
+            echo "- plataforma: \`${{ needs.setup.outputs.deploy_platform }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
