@@ -380,6 +380,15 @@ jobs:
             git pull --rebase origin "$REF"
           done
 
+      # ---- Tag de release (producao) ----------------------------------
+      - name: Criar tag de release
+        if: inputs.target_env == 'producao'
+        env:
+          NEW: ${{ steps.ver.outputs.new }}
+        run: |
+          git tag "$NEW"
+          git push origin "$NEW"
+
       # ---- Deploy SSH -------------------------------------------------
       - name: Configurar chave SSH
         env:
