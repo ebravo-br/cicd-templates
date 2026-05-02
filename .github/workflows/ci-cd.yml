@@ -34,6 +34,11 @@ on:
         type: string
         required: false
         default: 'ec2'
+      confirm_deploy:
+        description: 'Confirmar deploy? Marque true para executar o deploy apos o build.'
+        type: boolean
+        required: false
+        default: false
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -273,12 +278,24 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
+      - name: Instrucoes de deploy
+        if: ${{ !inputs.confirm_deploy }}
+        run: |
+          {
+            echo "### Build concluido — deploy pendente de confirmacao"
+            echo ""
+            echo "Para fazer o deploy, re-execute este workflow manualmente com:"
+            echo "- **Confirmar deploy**: \`true\`"
+            echo "- **Ambiente**: \`${{ needs.setup.outputs.target_env }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ===================================================================
   # 3. DEPLOY - gate manual + bump + ECR + SSH EC2
   # ===================================================================
   deploy:
     name: Deploy ${{ needs.setup.outputs.target_env }} • ${{ matrix.componente }}
     needs: [setup, build]
+    if: ${{ inputs.confirm_deploy == true }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
