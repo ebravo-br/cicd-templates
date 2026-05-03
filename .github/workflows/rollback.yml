@@ -16,7 +16,7 @@ on:
   workflow_call:
     inputs:
       image_tag:
-        description: 'Tag da imagem ECR para rollback (ex: 1.5.0)'
+        description: 'Nome da imagem para rollback (ex: 1.5.0)'
         type: string
         required: true
       target_env:
