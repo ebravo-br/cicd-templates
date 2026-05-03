@@ -344,49 +344,73 @@ jobs:
           fi
           echo "IMAGE_URI=$IMG" >> "$GITHUB_ENV"
 
-      # ---- Commit do bump ---------------------------------------------
+      # ---- Commit do bump via REST API (bypass branch protection) --------
       - name: Commit do bump na branch
         env:
           NEW:           ${{ steps.ver.outputs.new }}
           REF:           ${{ needs.setup.outputs.ref }}
           VERSION_FILE:  ${{ matrix.version_file }}
+          TEC:           ${{ matrix.tecnologia }}
           ENV_TARGET:    ${{ inputs.target_env }}
           GH_TOKEN_BUMP: ${{ secrets.GH_TOKEN_BUMP }}
         run: |
           set -euo pipefail
-          git fetch origin "$REF"
-          git checkout -B "$REF" "origin/$REF"
-          case "${{ matrix.tecnologia }}" in
-            spring-boot-java|java)
-              python3 - <<'PY'
-          import os, re
-          fp = os.environ['VERSION_FILE']; new = os.environ['NEW']
-          src = open(fp).read()
-          src = re.sub(r'(<project[^>]*>.*?<version>)([^<]+)(</version>)',
-                       lambda m: m.group(1)+new+m.group(3),
-                       src, count=1, flags=re.DOTALL)
-          open(fp,'w').write(src)
+          export GH_TOKEN="${GH_TOKEN_BUMP:-$GITHUB_TOKEN}"
+
+          python3 - <<'PY'
+          import json, base64, re, os, subprocess, sys
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          vf   = os.environ['VERSION_FILE']
+          new  = os.environ['NEW']
+          env  = os.environ['ENV_TARGET']
+          ref  = os.environ['REF']
+          tec  = os.environ['TEC']
+
+          # Ler conteudo atual e SHA da branch via API
+          r = subprocess.run(
+              ['gh', 'api', f'repos/{repo}/contents/{vf}?ref={ref}'],
+              capture_output=True, check=True
+          )
+          data    = json.loads(r.stdout)
+          sha     = data['sha']
+          content = base64.b64decode(data['content']).decode('utf-8')
+
+          # Aplicar nova versao
+          if tec in ('spring-boot-java', 'java'):
+              updated = re.sub(
+                  r'(<project[^>]*>.*?<version>)[^<]+(</version>)',
+                  lambda m: m.group(1) + new + m.group(2),
+                  content, count=1, flags=re.DOTALL
+              )
+          elif tec == 'python':
+              updated = re.sub(r'^version *= *"[^"]*"', f'version = "{new}"', content, flags=re.MULTILINE)
+          else:
+              pkg = json.loads(content)
+              pkg['version'] = new
+              updated = json.dumps(pkg, indent=2) + '\n'
+
+          if updated == content:
+              print('::notice::Versao ja atualizada, nada a commitar.')
+              sys.exit(0)
+
+          # Commit via REST API — respeita admin bypass mesmo em branch protegida
+          payload = json.dumps({
+              'message': f'chore(release): bump {vf} -> {new} ({env}) [skip ci]',
+              'content': base64.b64encode(updated.encode('utf-8')).decode(),
+              'sha': sha,
+              'branch': ref
+          })
+          r2 = subprocess.run(
+              ['gh', 'api', '-X', 'PUT', f'repos/{repo}/contents/{vf}', '--input', '-'],
+              input=payload.encode(), capture_output=True
+          )
+          if r2.returncode != 0:
+              print(f'::error::Falha ao commitar bump: {r2.stderr.decode()}', file=sys.stderr)
+              sys.exit(1)
+          result = json.loads(r2.stdout)
+          print(f'::notice::Bump commitado: {result["commit"]["sha"][:8]} — {vf} -> {new} ({env})')
           PY
-              ;;
-            python)
-              sed -i -E "s/^version *= *\"[^\"]+\"/version = \"${NEW}\"/" "$VERSION_FILE"
-              ;;
-            *)
-              node -e "const fs=require('fs'),f=process.env.VERSION_FILE;const j=JSON.parse(fs.readFileSync(f));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
-              ;;
-          esac
-          git add "$VERSION_FILE"
-          if git diff --cached --quiet; then echo "Nada a commitar"; exit 0; fi
-          git commit -m "chore(release): bump $VERSION_FILE -> $NEW ($ENV_TARGET) [skip ci]"
-          if [ -n "${GH_TOKEN_BUMP:-}" ]; then
-            git remote set-url origin "https://x-access-token:${GH_TOKEN_BUMP}@github.com/${GITHUB_REPOSITORY}.git"
-          fi
-          PUSHED=false
-          for i in 1 2 3; do
-            git push origin "HEAD:$REF" && PUSHED=true && break
-            git pull --rebase origin "$REF"
-          done
-          $PUSHED || { echo "::error::Falha ao fazer push do bump de versao. Verifique se o secret GH_TOKEN_BUMP esta configurado na org."; exit 1; }
 
       # ---- Tag de release (producao) ----------------------------------
       - name: Criar tag de release
