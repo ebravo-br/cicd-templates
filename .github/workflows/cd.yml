@@ -412,14 +412,19 @@ jobs:
           print(f'::notice::Bump commitado: {result["commit"]["sha"][:8]} — {vf} -> {new} ({env})')
           PY
 
-      # ---- Tag de release (producao) ----------------------------------
-      - name: Criar tag de release
+      # ---- GitHub Release (producao) ----------------------------------
+      - name: Criar GitHub Release
         if: inputs.target_env == 'producao'
         env:
-          NEW: ${{ steps.ver.outputs.new }}
+          NEW:           ${{ steps.ver.outputs.new }}
+          COMP:          ${{ matrix.componente }}
+          GH_TOKEN_BUMP: ${{ secrets.GH_TOKEN_BUMP }}
         run: |
-          git tag "$NEW"
-          git push origin "$NEW"
+          export GH_TOKEN="${GH_TOKEN_BUMP:-$GITHUB_TOKEN}"
+          gh release create "$NEW" \
+            --title "Release $NEW" \
+            --notes "Deploy de produção — \`$COMP:$NEW\`" \
+            --latest
 
       # ---- Deploy SSH -------------------------------------------------
       - name: Configurar chave SSH
