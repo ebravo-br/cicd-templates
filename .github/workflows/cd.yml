@@ -39,6 +39,8 @@ on:
         required: true
       SSH_KEY_PROD:
         required: true
+      GH_TOKEN_BUMP:
+        required: false
 
 permissions:
   contents: write
@@ -345,10 +347,11 @@ jobs:
       # ---- Commit do bump ---------------------------------------------
       - name: Commit do bump na branch
         env:
-          NEW:          ${{ steps.ver.outputs.new }}
-          REF:          ${{ needs.setup.outputs.ref }}
-          VERSION_FILE: ${{ matrix.version_file }}
-          ENV_TARGET:   ${{ inputs.target_env }}
+          NEW:           ${{ steps.ver.outputs.new }}
+          REF:           ${{ needs.setup.outputs.ref }}
+          VERSION_FILE:  ${{ matrix.version_file }}
+          ENV_TARGET:    ${{ inputs.target_env }}
+          GH_TOKEN_BUMP: ${{ secrets.GH_TOKEN_BUMP }}
         run: |
           set -euo pipefail
           git fetch origin "$REF"
@@ -375,10 +378,15 @@ jobs:
           git add "$VERSION_FILE"
           if git diff --cached --quiet; then echo "Nada a commitar"; exit 0; fi
           git commit -m "chore(release): bump $VERSION_FILE -> $NEW ($ENV_TARGET) [skip ci]"
+          if [ -n "${GH_TOKEN_BUMP:-}" ]; then
+            git remote set-url origin "https://x-access-token:${GH_TOKEN_BUMP}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
+          PUSHED=false
           for i in 1 2 3; do
-            git push origin "HEAD:$REF" && break
+            git push origin "HEAD:$REF" && PUSHED=true && break
             git pull --rebase origin "$REF"
           done
+          $PUSHED || { echo "::error::Falha ao fazer push do bump de versao. Verifique se o secret GH_TOKEN_BUMP esta configurado na org."; exit 1; }
 
       # ---- Tag de release (producao) ----------------------------------
       - name: Criar tag de release
