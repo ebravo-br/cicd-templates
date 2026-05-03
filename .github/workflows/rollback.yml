@@ -1,0 +1,266 @@
+# =====================================================================
+#  ROLLBACK - REUSABLE WORKFLOW
+#
+#  Este arquivo vive em:
+#      ebravo-br/cicd-templates/.github/workflows/rollback.yml
+#
+#  Invocado pelo stub de cada repo via:
+#      jobs.rollback.uses: ebravo-br/cicd-templates/.github/workflows/rollback.yml@v1
+#
+#  Uso:
+#    1. Deixe image_tag vazio -> lista as 10 ultimas imagens do ECR e encerra
+#    2. Informe image_tag com a versao desejada -> executa o rollback
+#
+#  Deploy em producao requer usuario listado em DEPLOY_PROD_ALLOWED (org var).
+# =====================================================================
+
+name: Rollback - Reusable
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Tag da imagem ECR (ex: 1.5.0). Vazio = listar as 10 mais recentes.'
+        type: string
+        required: false
+        default: ''
+      target_env:
+        description: 'homologacao | producao'
+        type: string
+        required: true
+      deploy_platform:
+        description: 'ec2 (ativo) | ecs | gke (futuros)'
+        type: string
+        required: false
+        default: ec2
+    secrets:
+      AWS_ACCESS_KEY_ID:     { required: true }
+      AWS_SECRET_ACCESS_KEY: { required: true }
+      SSH_KEY_HOMOL:         { required: true }
+      SSH_KEY_PROD:          { required: true }
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: sa-east-1
+
+jobs:
+  # ===================================================================
+  # 0. CHECK-PERMISSION
+  # ===================================================================
+  check-permission:
+    name: Verificar permissao
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bloquear rollback em producao para usuarios nao autorizados
+        if: inputs.target_env == 'producao'
+        env:
+          ACTOR:   ${{ github.actor }}
+          ALLOWED: ${{ vars.DEPLOY_PROD_ALLOWED }}
+        run: |
+          if [ -z "$ALLOWED" ]; then
+            echo "::error::Variavel DEPLOY_PROD_ALLOWED nao configurada na org. Contate o administrador."
+            exit 1
+          fi
+          if echo " $ALLOWED " | grep -qw "$ACTOR"; then
+            echo "::notice::Permissao concedida: $ACTOR pode fazer rollback em producao."
+          else
+            echo "::error::Usuario '$ACTOR' nao tem permissao para rollback em producao. Lista de autorizados: $ALLOWED"
+            exit 1
+          fi
+
+  # ===================================================================
+  # 1. SETUP — le .github/pipeline.yml e monta a matrix
+  # ===================================================================
+  setup:
+    name: Setup • parse .github/pipeline.yml
+    needs: check-permission
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.props.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse .github/pipeline.yml -> matrix
+        id: props
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -f .github/pipeline.yml ] || { echo "::error::.github/pipeline.yml nao encontrado"; exit 1; }
+
+          python3 - <<'PY'
+          import yaml, json, os, sys
+
+          cfg = yaml.safe_load(open('.github/pipeline.yml'))
+          out = open(os.environ['GITHUB_OUTPUT'], 'a')
+
+          def g(d, *keys, default=''):
+              for k in keys:
+                  d = (d or {}).get(k)
+                  if d is None: return default
+              return str(d) if d is not None else default
+
+          mono  = str(cfg.get('monorepo', False)).lower() == 'true'
+          items = []
+
+          if mono:
+              for app in ('api', 'web'):
+                  sub  = cfg.get(app) or {}
+                  comp = g(sub, 'componente')
+                  if comp:
+                      items.append({'app': app, 'componente': comp})
+          else:
+              comp = g(cfg, 'componente')
+              if not comp:
+                  print('::error::componente ausente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+              items.append({'app': 'main', 'componente': comp})
+
+          if not items:
+              print('::error::nenhum componente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+
+          out.write(f"matrix={json.dumps({'include': items})}\n")
+          print(json.dumps({'include': items}, indent=2))
+          PY
+
+  # ===================================================================
+  # 2. ROLLBACK — valida tag no ECR e faz deploy via SSH
+  # ===================================================================
+  rollback:
+    name: Rollback ${{ inputs.target_env }} • ${{ matrix.componente }}
+    needs: [check-permission, setup]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      # ---- Listar imagens quando image_tag nao foi informado ----------
+      - name: Listar ultimas 10 imagens do ECR
+        if: inputs.image_tag == ''
+        env:
+          REPO: ${{ matrix.componente }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Imagens disponiveis no ECR — \`$REPO\`"
+            echo ""
+            echo "Re-execute o workflow informando o campo **image_tag** com a versao desejada."
+            echo ""
+            echo "| # | Tag | Enviada em |"
+            echo "|---|-----|------------|"
+            aws ecr describe-images --repository-name "$REPO" \
+              --query 'sort_by(imageDetails, &imagePushedAt) | reverse(@) | [0:10]' \
+              --output json | python3 -c "
+          import json, sys
+          images = json.load(sys.stdin)
+          for i, img in enumerate(images, 1):
+              tags    = ' / '.join(t for t in img.get('imageTags', []) if t != 'latest') or 'sem tag'
+              pushed  = img.get('imagePushedAt', '')
+              print(f'| {i} | \`{tags}\` | {pushed} |')
+          "
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::image_tag nao informado. Veja o resumo desta execucao para selecionar a versao e re-execute."
+          exit 1
+
+      # ---- Validar tag no ECR -----------------------------------------
+      - name: Validar tag no ECR
+        env:
+          REPO: ${{ matrix.componente }}
+          TAG:  ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          FOUND=$(aws ecr describe-images --repository-name "$REPO" \
+            --image-ids imageTag="$TAG" \
+            --query 'imageDetails[0].imageTags[0]' \
+            --output text 2>/dev/null || echo "NONE")
+          if [ "$FOUND" = "NONE" ] || [ -z "$FOUND" ]; then
+            {
+              echo "### Tag nao encontrada — \`$TAG\`"
+              echo ""
+              echo "Ultimas 10 tags disponiveis no repositorio \`$REPO\`:"
+              echo ""
+              echo "| # | Tag | Enviada em |"
+              echo "|---|-----|------------|"
+              aws ecr describe-images --repository-name "$REPO" \
+                --query 'sort_by(imageDetails, &imagePushedAt) | reverse(@) | [0:10]' \
+                --output json | python3 -c "
+          import json, sys
+          images = json.load(sys.stdin)
+          for i, img in enumerate(images, 1):
+              tags   = ' / '.join(t for t in img.get('imageTags', []) if t != 'latest') or 'sem tag'
+              pushed = img.get('imagePushedAt', '')
+              print(f'| {i} | \`{tags}\` | {pushed} |')
+          "
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Tag '$TAG' nao encontrada no ECR para '$REPO'. Veja o resumo desta execucao."
+            exit 1
+          fi
+          echo "::notice::Tag '$TAG' validada no ECR para '$REPO'."
+
+      # ---- Configurar chave SSH ----------------------------------------
+      - name: Configurar chave SSH
+        env:
+          KEY_HOMOL:  ${{ secrets.SSH_KEY_HOMOL }}
+          KEY_PROD:   ${{ secrets.SSH_KEY_PROD }}
+          ENV_TARGET: ${{ inputs.target_env }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          if [ "$ENV_TARGET" = "producao" ]; then
+            printf '%s\n' "$KEY_PROD"  > ~/.ssh/deploy_key
+          else
+            printf '%s\n' "$KEY_HOMOL" > ~/.ssh/deploy_key
+          fi
+          chmod 600 ~/.ssh/deploy_key
+
+      # ---- Deploy SSH --------------------------------------------------
+      - name: Rollback via SSH (EC2)
+        if: inputs.deploy_platform == 'ec2'
+        env:
+          ENV_TARGET: ${{ inputs.target_env }}
+          COMP:       ${{ matrix.componente }}
+          TAG:        ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$ENV_TARGET" = "producao" ]; then
+            HOST="ec2-user@ec2-18-230-19-215.sa-east-1.compute.amazonaws.com"
+            SCRIPT="/home/ec2-user/deploy/deploy.sh"
+          else
+            HOST="ubuntu@54.232.76.143"
+            SCRIPT="/home/ubuntu/deploy/deploy.sh"
+          fi
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
+            "$SCRIPT $COMP $TAG"
+
+      - name: Rollback ECS  (desativado)
+        if: inputs.deploy_platform == 'ecs'
+        run: |
+          echo "::warning::Rollback ECS ainda nao habilitado."
+          exit 0
+
+      - name: Rollback GKE  (desativado)
+        if: inputs.deploy_platform == 'gke'
+        run: |
+          echo "::warning::Rollback GKE ainda nao habilitado."
+          exit 0
+
+      # ---- Resumo -----------------------------------------------------
+      - name: Resumo
+        if: always()
+        run: |
+          {
+            echo "### Rollback ${{ inputs.target_env }}"
+            echo ""
+            echo "- componente: \`${{ matrix.componente }}\`"
+            echo "- tag:        \`${{ inputs.image_tag }}\`"
+            echo "- plataforma: \`${{ inputs.deploy_platform }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
