@@ -7,10 +7,6 @@
 #  Invocado pelo stub de cada repo via:
 #      jobs.rollback.uses: ebravo-br/cicd-templates/.github/workflows/rollback.yml@v1
 #
-#  Uso:
-#    1. Deixe image_tag vazio -> lista as 10 ultimas imagens do ECR e encerra
-#    2. Informe image_tag com a versao desejada -> executa o rollback
-#
 #  Deploy em producao requer usuario listado em DEPLOY_PROD_ALLOWED (org var).
 # =====================================================================
 
@@ -20,10 +16,9 @@ on:
   workflow_call:
     inputs:
       image_tag:
-        description: 'Tag da imagem ECR (ex: 1.5.0). Vazio = listar as 10 mais recentes.'
+        description: 'Tag da imagem ECR para rollback (ex: 1.5.0)'
         type: string
-        required: false
-        default: ''
+        required: true
       target_env:
         description: 'homologacao | producao'
         type: string
@@ -144,34 +139,6 @@ jobs:
 
       - uses: aws-actions/amazon-ecr-login@v2
 
-      # ---- Listar imagens quando image_tag nao foi informado ----------
-      - name: Listar ultimas 10 imagens do ECR
-        if: inputs.image_tag == ''
-        env:
-          REPO: ${{ matrix.componente }}
-        run: |
-          set -euo pipefail
-          {
-            echo "### Imagens disponiveis no ECR — \`$REPO\`"
-            echo ""
-            echo "Re-execute o workflow informando o campo **image_tag** com a versao desejada."
-            echo ""
-            echo "| # | Tag | Enviada em |"
-            echo "|---|-----|------------|"
-            aws ecr describe-images --repository-name "$REPO" \
-              --query 'sort_by(imageDetails, &imagePushedAt) | reverse(@) | [0:10]' \
-              --output json | python3 -c "
-          import json, sys
-          images = json.load(sys.stdin)
-          for i, img in enumerate(images, 1):
-              tags    = ' / '.join(t for t in img.get('imageTags', []) if t != 'latest') or 'sem tag'
-              pushed  = img.get('imagePushedAt', '')
-              print(f'| {i} | \`{tags}\` | {pushed} |')
-          "
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::image_tag nao informado. Veja o resumo desta execucao para selecionar a versao e re-execute."
-          exit 1
-
       # ---- Validar tag no ECR -----------------------------------------
       - name: Validar tag no ECR
         env:
@@ -184,28 +151,10 @@ jobs:
             --query 'imageDetails[0].imageTags[0]' \
             --output text 2>/dev/null || echo "NONE")
           if [ "$FOUND" = "NONE" ] || [ -z "$FOUND" ]; then
-            {
-              echo "### Tag nao encontrada — \`$TAG\`"
-              echo ""
-              echo "Ultimas 10 tags disponiveis no repositorio \`$REPO\`:"
-              echo ""
-              echo "| # | Tag | Enviada em |"
-              echo "|---|-----|------------|"
-              aws ecr describe-images --repository-name "$REPO" \
-                --query 'sort_by(imageDetails, &imagePushedAt) | reverse(@) | [0:10]' \
-                --output json | python3 -c "
-          import json, sys
-          images = json.load(sys.stdin)
-          for i, img in enumerate(images, 1):
-              tags   = ' / '.join(t for t in img.get('imageTags', []) if t != 'latest') or 'sem tag'
-              pushed = img.get('imagePushedAt', '')
-              print(f'| {i} | \`{tags}\` | {pushed} |')
-          "
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::Tag '$TAG' nao encontrada no ECR para '$REPO'. Veja o resumo desta execucao."
+            echo "::error::Imagem '$TAG' nao encontrada no ECR para o repositorio '$REPO'. Verifique a tag informada e tente novamente."
             exit 1
           fi
-          echo "::notice::Tag '$TAG' validada no ECR para '$REPO'."
+          echo "::notice::Imagem '$TAG' encontrada no ECR. Iniciando rollback em ${{ inputs.target_env }}."
 
       # ---- Configurar chave SSH ----------------------------------------
       - name: Configurar chave SSH
@@ -243,15 +192,11 @@ jobs:
 
       - name: Rollback ECS  (desativado)
         if: inputs.deploy_platform == 'ecs'
-        run: |
-          echo "::warning::Rollback ECS ainda nao habilitado."
-          exit 0
+        run: echo "::warning::Rollback ECS ainda nao habilitado." && exit 0
 
       - name: Rollback GKE  (desativado)
         if: inputs.deploy_platform == 'gke'
-        run: |
-          echo "::warning::Rollback GKE ainda nao habilitado."
-          exit 0
+        run: echo "::warning::Rollback GKE ainda nao habilitado." && exit 0
 
       # ---- Resumo -----------------------------------------------------
       - name: Resumo
