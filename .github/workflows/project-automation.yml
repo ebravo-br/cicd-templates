@@ -1,0 +1,15 @@
+# >>> NAO EDITE ESTE ARQUIVO <<<
+# Logica em: ebravo-br/cicd-templates/.github/workflows/project-automation.yml
+name: Project Automation
+
+on:
+  pull_request:
+    types: [opened, closed]
+
+permissions:
+  contents: write
+
+jobs:
+  project:
+    uses: ebravo-br/cicd-templates/.github/workflows/project-automation.yml@v1
+    secrets: inherit
