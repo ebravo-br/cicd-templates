@@ -121,6 +121,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.nodever.outputs.v }}
+          cache: 'npm'
+          cache-dependency-path: ${{ matrix.context }}/package-lock.json
 
       - name: NPM install + build
         if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
