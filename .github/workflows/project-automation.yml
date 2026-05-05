@@ -1,15 +1,207 @@
-# >>> NAO EDITE ESTE ARQUIVO <<<
-# Logica em: ebravo-br/cicd-templates/.github/workflows/project-automation.yml
-name: Project Automation
+# =====================================================================
+#  PROJECT AUTOMATION - REUSABLE WORKFLOW
+#
+#  Este arquivo vive em:
+#      ebravo-br/cicd-templates/.github/workflows/project-automation.yml
+#
+#  Invocado pelo stub de cada repo via:
+#      jobs.project.uses: ebravo-br/cicd-templates/.github/workflows/project-automation.yml@v1
+#
+#  Comportamento:
+#    - PR opened  -> move issue vinculada para "Code Review"
+#    - PR merged  -> move issue vinculada para "Finalizado"
+#
+#  Deteccao de issues vinculadas via closingIssuesReferences (GraphQL),
+#  que captura issues linkadas pelo corpo do PR ("closes #N") E pelo
+#  sidebar "Development" — sem depender do formato do body.
+#
+#  Secret necessario: PROJECT_PAT (escopo project + repo + read:org)
+#  O GITHUB_TOKEN nativo NAO tem acesso ao Projects v2.
+# =====================================================================
+name: Project Automation - Reusable
 
 on:
-  pull_request:
-    types: [opened, closed]
+  workflow_call: {}
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  PROJECT_NUMBER: "2"
+  ORG:            "ebravo-br"
 
 jobs:
-  project:
-    uses: ebravo-br/cicd-templates/.github/workflows/project-automation.yml@v1
-    secrets: inherit
+  delete-branch:
+    name: Excluir branch após merge
+    runs-on: ubuntu-latest
+    if: >
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      (
+        startsWith(github.event.pull_request.head.ref, 'feature/') ||
+        startsWith(github.event.pull_request.head.ref, 'bugfix/')  ||
+        startsWith(github.event.pull_request.head.ref, 'hotfix/')
+      )
+    permissions:
+      contents: write
+    steps:
+      - name: Excluir branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH:   ${{ github.event.pull_request.head.ref }}
+          REPO:     ${{ github.repository }}
+        run: |
+          gh api -X DELETE repos/$REPO/git/refs/heads/$BRANCH \
+            && echo "::notice::Branch '$BRANCH' excluida." \
+            || echo "::warning::Nao foi possivel excluir '$BRANCH' (pode ja ter sido removida)."
+
+  move-issue:
+    name: Mover issue no projeto
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determinar status alvo
+        id: target
+        run: |
+          if   [ "${{ github.event.action }}" = "opened" ]; then
+            echo "status=Code Review" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.action }}" = "closed" ] && \
+               [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+            echo "status=Finalizado" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mover issues vinculadas
+        if: steps.target.outputs.status != ''
+        env:
+          GH_TOKEN:       ${{ secrets.PROJECT_PAT }}
+          TARGET_STATUS:  ${{ steps.target.outputs.status }}
+          PR_NUMBER:      ${{ github.event.pull_request.number }}
+          ORG:            ${{ env.ORG }}
+          PROJECT_NUMBER: ${{ env.PROJECT_NUMBER }}
+          REPO:           ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os, subprocess, json, sys
+
+          pr_number      = int(os.environ['PR_NUMBER'])
+          org            = os.environ['ORG']
+          project_number = int(os.environ['PROJECT_NUMBER'])
+          target_status  = os.environ['TARGET_STATUS']
+          repo           = os.environ['REPO']
+
+          def gql(query, variables=None):
+              payload = json.dumps({'query': query, 'variables': variables or {}})
+              r = subprocess.run(
+                  ['gh', 'api', 'graphql', '--input', '-'],
+                  input=payload.encode(), capture_output=True
+              )
+              data = json.loads(r.stdout)
+              if 'errors' in data:
+                  print(f'::error::GraphQL: {data["errors"]}', file=sys.stderr)
+                  sys.exit(1)
+              return data['data']
+
+          repo_owner, repo_name = repo.split('/')
+
+          # Buscar issues vinculadas ao PR via closingIssuesReferences
+          # Captura issues do corpo ("closes #N") E do sidebar "Development"
+          pr_data = gql('''
+            query($owner: String!, $repo: String!, $num: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $num) {
+                  closingIssuesReferences(first: 10) {
+                    nodes {
+                      number id title
+                      projectItems(first: 10) {
+                        nodes { id project { id } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ''', {'owner': repo_owner, 'repo': repo_name, 'num': pr_number})
+
+          issues = pr_data['repository']['pullRequest']['closingIssuesReferences']['nodes']
+          if not issues:
+              print('::notice::Nenhuma issue vinculada ao PR. Vincule pelo sidebar "Development" ou use "closes #N" no corpo.')
+              sys.exit(0)
+
+          # Buscar projeto e campo Status
+          proj_data = gql('''
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 20) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id name
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ''', {'org': org, 'num': project_number})
+
+          project    = proj_data['organization']['projectV2']
+          project_id = project['id']
+
+          status_field = next(
+              (f for f in project['fields']['nodes'] if f.get('name') == 'Status'),
+              None
+          )
+          if not status_field:
+              print('::error::Campo Status nao encontrado no projeto.', file=sys.stderr)
+              sys.exit(1)
+
+          option = next(
+              (o for o in status_field['options']
+               if o['name'].lower() == target_status.lower()),
+              None
+          )
+          if not option:
+              print(f'::error::Opcao "{target_status}" nao encontrada no campo Status.', file=sys.stderr)
+              sys.exit(1)
+
+          status_field_id = status_field['id']
+          option_id       = option['id']
+
+          for issue in issues:
+              item = next(
+                  (pi for pi in issue['projectItems']['nodes']
+                   if pi['project']['id'] == project_id),
+                  None
+              )
+
+              if not item:
+                  add_data = gql('''
+                    mutation($projectId: ID!, $contentId: ID!) {
+                      addProjectV2ItemById(input: {
+                        projectId: $projectId, contentId: $contentId
+                      }) { item { id } }
+                    }
+                  ''', {'projectId': project_id, 'contentId': issue['id']})
+                  item_id = add_data['addProjectV2ItemById']['item']['id']
+                  print(f'::notice::Issue #{issue["number"]} adicionada ao projeto.')
+              else:
+                  item_id = item['id']
+
+              gql('''
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                    value: { singleSelectOptionId: $optionId }
+                  }) { projectV2Item { id } }
+                }
+              ''', {
+                'projectId': project_id, 'itemId': item_id,
+                'fieldId': status_field_id, 'optionId': option_id
+              })
+              print(f'::notice::Issue #{issue["number"]} ({issue["title"]}) -> "{target_status}".')
+          PY

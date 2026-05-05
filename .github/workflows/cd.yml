@@ -155,15 +155,20 @@ jobs:
               tec  = g(cfg, 'tecnologia')
               if not comp: print('::error::componente ausente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
               if not tec:  print('::error::tecnologia ausente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
-              app = 'api' if os.path.isfile('infra/docker/api/Dockerfile') else \
-                    'web' if os.path.isfile('infra/docker/web/Dockerfile') else None
-              if not app:
-                  print('::error::Dockerfile nao encontrado em infra/docker/{api,web}/Dockerfile', file=sys.stderr); sys.exit(1)
+              if os.path.isfile('infra/docker/Dockerfile'):
+                  df  = 'infra/docker/Dockerfile'
+                  app = 'api' if tec in ('spring-boot-java', 'java', 'python') else 'web'
+              elif os.path.isfile('infra/docker/api/Dockerfile'):
+                  df, app = 'infra/docker/api/Dockerfile', 'api'
+              elif os.path.isfile('infra/docker/web/Dockerfile'):
+                  df, app = 'infra/docker/web/Dockerfile', 'web'
+              else:
+                  print('::error::Dockerfile nao encontrado. Esperado: infra/docker/Dockerfile', file=sys.stderr); sys.exit(1)
               items.append({
                   'app': app, 'componente': comp, 'tecnologia': tec,
                   'node': g(cfg,'node'), 'jdk': g(cfg,'jdk'),
                   'python': g(cfg,'python') or dp,
-                  'context': '.', 'dockerfile': f'infra/docker/{app}/Dockerfile',
+                  'context': '.', 'dockerfile': df,
                   'version_file': version_file(tec, '.'),
               })
 

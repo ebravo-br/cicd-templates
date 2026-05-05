@@ -1,0 +1,154 @@
+# =====================================================================
+#  ISSUE EPIC ASSIGNMENT - REUSABLE WORKFLOW
+#
+#  Este arquivo vive em:
+#      ebravo-br/cicd-templates/.github/workflows/issue-epic.yml
+#
+#  Invocado pelo stub de cada repo via:
+#      jobs.epic.uses: ebravo-br/cicd-templates/.github/workflows/issue-epic.yml@v1
+#
+#  Comportamento ao criar uma nova Issue:
+#    1. Adiciona a issue ao projeto da org
+#    2. Define Status = "A Fazer"
+#    3. Define campo "Épico" com base no prefixo do nome do repo:
+#         ebdocs-*  ->  EBDOCS
+#         ebcare-*  ->  EBCARE
+#         tramar-*  ->  TRAMAR
+#         (sem match) -> apenas adiciona ao projeto sem definir épico
+#
+#  Secret necessario: PROJECT_PAT (escopo project + repo + read:org)
+# =====================================================================
+name: Issue Epic Assignment - Reusable
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_NUMBER: "2"
+  ORG:            "ebravo-br"
+
+jobs:
+  assign-epic:
+    name: Atribuir épico à issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detectar épico pelo nome do repo
+        id: epic
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+          REPO_LC="${REPO_NAME,,}"
+          if   [[ "$REPO_LC" == ebdocs* ]]; then echo "epic=EBDOCS" >> "$GITHUB_OUTPUT"
+          elif [[ "$REPO_LC" == ebcare* ]]; then echo "epic=EBCARE" >> "$GITHUB_OUTPUT"
+          elif [[ "$REPO_LC" == tramar* ]]; then echo "epic=TRAMAR" >> "$GITHUB_OUTPUT"
+          else echo "epic=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Adicionar issue ao projeto e atribuir épico
+        env:
+          GH_TOKEN:       ${{ secrets.PROJECT_PAT }}
+          EPIC:           ${{ steps.epic.outputs.epic }}
+          ISSUE_ID:       ${{ github.event.issue.node_id }}
+          ISSUE_NUMBER:   ${{ github.event.issue.number }}
+          ORG:            ${{ env.ORG }}
+          PROJECT_NUMBER: ${{ env.PROJECT_NUMBER }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os, subprocess, json, sys
+
+          epic           = os.environ.get('EPIC', '')
+          issue_id       = os.environ['ISSUE_ID']
+          issue_number   = os.environ['ISSUE_NUMBER']
+          org            = os.environ['ORG']
+          project_number = int(os.environ['PROJECT_NUMBER'])
+
+          def gql(query, variables=None):
+              payload = json.dumps({'query': query, 'variables': variables or {}})
+              r = subprocess.run(
+                  ['gh', 'api', 'graphql', '--input', '-'],
+                  input=payload.encode(), capture_output=True
+              )
+              data = json.loads(r.stdout)
+              if 'errors' in data:
+                  print(f'::error::GraphQL: {data["errors"]}', file=sys.stderr)
+                  sys.exit(1)
+              return data['data']
+
+          # Buscar projeto, campo Status e campo Épico
+          proj_data = gql('''
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 20) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id name
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ''', {'org': org, 'num': project_number})
+
+          project    = proj_data['organization']['projectV2']
+          project_id = project['id']
+
+          def find_field(name):
+              return next(
+                  (f for f in project['fields']['nodes'] if f.get('name') == name),
+                  None
+              )
+
+          status_field = find_field('Status')
+          epic_field   = find_field('Épico')
+
+          # Adicionar issue ao projeto
+          add_data = gql('''
+            mutation($projectId: ID!, $contentId: ID!) {
+              addProjectV2ItemById(input: {
+                projectId: $projectId, contentId: $contentId
+              }) { item { id } }
+            }
+          ''', {'projectId': project_id, 'contentId': issue_id})
+          item_id = add_data['addProjectV2ItemById']['item']['id']
+          print(f'::notice::Issue #{issue_number} adicionada ao projeto.')
+
+          def set_field(field, option_name, label):
+              if not field:
+                  print(f'::warning::Campo "{label}" nao encontrado no projeto.')
+                  return
+              opt = next(
+                  (o for o in field['options']
+                   if o['name'].lower() == option_name.lower()),
+                  None
+              )
+              if not opt:
+                  print(f'::warning::Opcao "{option_name}" nao encontrada em "{label}".')
+                  return
+              gql('''
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                    value: { singleSelectOptionId: $optionId }
+                  }) { projectV2Item { id } }
+                }
+              ''', {
+                'projectId': project_id, 'itemId': item_id,
+                'fieldId': field['id'], 'optionId': opt['id']
+              })
+              print(f'::notice::Issue #{issue_number} {label} -> "{option_name}".')
+
+          set_field(status_field, 'Backlog', 'Status')
+
+          if epic:
+              set_field(epic_field, epic, 'Épico')
+          else:
+              print(f'::notice::Nenhum épico mapeado para este repositório.')
+          PY
