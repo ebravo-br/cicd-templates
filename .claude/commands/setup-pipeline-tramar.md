@@ -245,8 +245,12 @@ permissions:
 jobs:
   project:
     uses: ebravo-br/cicd-templates/.github/workflows/project-automation.yml@v1
-    secrets: inherit
+    secrets:
+      PROJECT_APP_ID:          ${{ secrets.PROJECT_APP_ID }}
+      PROJECT_APP_PRIVATE_KEY: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
 ```
+
+> **Por que não `secrets: inherit`?** Cross-org (`tramar-br` chamando reusable em `ebravo-br/cicd-templates`) o GitHub não propaga secrets via `inherit`. Precisa passar explicitamente.
 
 ---
 
@@ -271,7 +275,9 @@ permissions:
 jobs:
   epic:
     uses: ebravo-br/cicd-templates/.github/workflows/issue-epic.yml@v1
-    secrets: inherit
+    secrets:
+      PROJECT_APP_ID:          ${{ secrets.PROJECT_APP_ID }}
+      PROJECT_APP_PRIVATE_KEY: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
 ```
 
 ---
@@ -513,7 +519,7 @@ gh secret set GH_TOKEN_BUMP --org tramar-br --visibility all --body "<TOKEN>"
 
 **Secrets `PROJECT_APP_ID` + `PROJECT_APP_PRIVATE_KEY` — obrigatórias para automação do GitHub Projects funcionar**
 
-A automação de Kanban (mover issues, atribuir épicos, centralizar issues no projeto "Ebravo Projetos") usa um **GitHub App** instalado em `ebravo-br` e `tramar-br`. As secrets armazenam o App ID e a private key e precisam estar presentes na org `tramar-br` (igual à `ebravo-br`) para que `secrets: inherit` funcione nos workflows reutilizáveis.
+A automação de Kanban (mover issues, atribuir épicos, centralizar issues no projeto "Ebravo Projetos") usa um **GitHub App** instalado em `ebravo-br` e `tramar-br`. As secrets armazenam o App ID e a private key e precisam estar presentes na org `tramar-br` (igual à `ebravo-br`). Os stubs de `tramar-br` passam essas secrets **explicitamente** para os reusables em `ebravo-br/cicd-templates` (ver passos 3c/3d) — `secrets: inherit` não funciona em chamada cross-org de reusable workflow.
 
 Pré-requisito: o App **"Ebravo Project Automation"** já deve estar criado e instalado nas duas orgs. Se ainda não estiver, ver a seção [Pré-requisitos: GitHub App](setup-pipeline.md#pré-requisitos-github-app-uma-vez-só) em `setup-pipeline`.
 

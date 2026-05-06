@@ -29,7 +29,12 @@
 name: Project Automation - Reusable
 
 on:
-  workflow_call: {}
+  workflow_call:
+    secrets:
+      PROJECT_APP_ID:
+        required: true
+      PROJECT_APP_PRIVATE_KEY:
+        required: true
 
 permissions:
   contents: read
