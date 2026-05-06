@@ -1,17 +1,26 @@
-# Setup Pipeline ebravo-br
+# Setup Pipeline tramar-br
 
-Configura o pipeline CI/CD completo da ebravo-br em um repositório GitHub:
-cria os stubs de workflow, o `pipeline.yml`, proteção de branch e verifica
-secrets/variáveis da org.
+Configura o pipeline CI/CD completo em um repositório da `tramar-br`,
+reaproveitando os workflows reutilizáveis que vivem em
+**`ebravo-br/cicd-templates`** (centralização cross-org).
+
+Cria os stubs de workflow, o `pipeline.yml`, proteção de branch e
+verifica secrets/variáveis da org `tramar-br`.
+
+> **Pré-requisito (uma vez só)**: o GitHub App **"Ebravo Project Automation"**
+> precisa estar criado em `ebravo-br`, instalado em `ebravo-br` e `tramar-br`,
+> com escrita no projeto "Ebravo Projetos" (#2). Ver a seção
+> [Pré-requisitos: GitHub App](setup-pipeline.md#pré-requisitos-github-app-uma-vez-só)
+> em `setup-pipeline`. Sem isso, as automações de projeto não funcionam.
 
 ## Input: $ARGUMENTS
 
 Formato esperado: `<repo> [tecnologia] [componente]`
 
 Exemplos:
-- `/setup-pipeline meu-servico spring-boot-java`
-- `/setup-pipeline ebravo-br/meu-servico spring-boot-java meu-servico`
-- `/setup-pipeline meu-front nodejs`
+- `/setup-pipeline-tramar meu-servico spring-boot-java`
+- `/setup-pipeline-tramar tramar-br/meu-servico spring-boot-java meu-servico`
+- `/setup-pipeline-tramar meu-front nodejs`
 
 ---
 
@@ -20,7 +29,7 @@ Exemplos:
 ### Passo 0 — Parsear argumentos
 
 A partir de `$ARGUMENTS`:
-- **repo**: nome do repo ou `org/repo`. Se não tiver `/`, prefixar com `ebravo-br/`.
+- **repo**: nome do repo ou `org/repo`. Se não tiver `/`, prefixar com `tramar-br/`.
 - **tecnologia**: `spring-boot-java`, `java`, `nodejs`, `angular` ou `python`. Se ausente, perguntar ao usuário antes de continuar.
 - **componente**: nome do serviço/componente. Se ausente, usar o nome do repo (sem o org prefix).
 - **versao extra** (opcional): perguntar apenas se a tecnologia exigir versão não-padrão:
@@ -110,7 +119,7 @@ EOF
 ENCODED=$(printf '%s' "$CONTENT" | base64)
 # Se arquivo já existir, incluir "sha": "<sha>" no JSON
 gh api -X PUT repos/<org/repo>/contents/.github/workflows/ci.yml \
-  --field message="ci: instalar stub de CI ebravo-br" \
+  --field message="ci: instalar stub de CI tramar-br" \
   --field content="$ENCODED"
 ```
 
@@ -473,16 +482,16 @@ EOF
 
 ### Passo 7 — Verificar secrets e variáveis da org
 
-Checar se as secrets obrigatórias existem na org:
+Checar se as secrets obrigatórias existem na org `tramar-br`:
 ```bash
-gh api orgs/ebravo-br/actions/secrets | jq '[.secrets[].name]'
+gh api orgs/tramar-br/actions/secrets | jq '[.secrets[].name]'
 ```
 
 Secrets esperadas: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SSH_KEY_HOMOL`, `SSH_KEY_PROD`, `GH_TOKEN_BUMP`, `PROJECT_APP_ID`, `PROJECT_APP_PRIVATE_KEY`
 
 Checar variável de controle de acesso:
 ```bash
-gh api orgs/ebravo-br/actions/variables/DEPLOY_PROD_ALLOWED 2>/dev/null
+gh api orgs/tramar-br/actions/variables/DEPLOY_PROD_ALLOWED 2>/dev/null
 ```
 
 Se alguma estiver faltando, listar claramente o que falta e orientar o usuário a configurar antes do primeiro deploy.
@@ -499,26 +508,22 @@ Se estiver ausente, instruir o usuário a:
 
 2. Cadastrar na org:
 ```bash
-gh secret set GH_TOKEN_BUMP --org ebravo-br --visibility all --body "<TOKEN>"
+gh secret set GH_TOKEN_BUMP --org tramar-br --visibility all --body "<TOKEN>"
 ```
 
 **Secrets `PROJECT_APP_ID` + `PROJECT_APP_PRIVATE_KEY` — obrigatórias para automação do GitHub Projects funcionar**
 
-O `GITHUB_TOKEN` nativo não tem permissão de escrita em Projects v2. As automações de Kanban (mover issues, atribuir épicos, centralizar repos cross-org no projeto "Ebravo Projetos") usam um **GitHub App** instalado nas duas orgs (`ebravo-br` e `tramar-br`).
+A automação de Kanban (mover issues, atribuir épicos, centralizar issues no projeto "Ebravo Projetos") usa um **GitHub App** instalado em `ebravo-br` e `tramar-br`. As secrets armazenam o App ID e a private key e precisam estar presentes na org `tramar-br` (igual à `ebravo-br`) para que `secrets: inherit` funcione nos workflows reutilizáveis.
 
-Pré-requisito: o App **"Ebravo Project Automation"** já deve estar criado e instalado em ambas as orgs. Se não estiver, ver a seção [Pré-requisitos: GitHub App](#pré-requisitos-github-app-uma-vez-só) abaixo.
+Pré-requisito: o App **"Ebravo Project Automation"** já deve estar criado e instalado nas duas orgs. Se ainda não estiver, ver a seção [Pré-requisitos: GitHub App](setup-pipeline.md#pré-requisitos-github-app-uma-vez-só) em `setup-pipeline`.
 
-Se as secrets estiverem ausentes, instruir o usuário a:
-
-1. Pegar o **App ID** (numérico) na página do App em `github.com/organizations/ebravo-br/settings/apps/<app-slug>`.
-2. Gerar (ou usar a chave já gerada) o **Private Key** (`.pem`) na mesma página.
-3. Cadastrar as duas secrets na org:
+Se estiverem ausentes, instruir o usuário a cadastrar:
 ```bash
-gh secret set PROJECT_APP_ID         --org ebravo-br --visibility all --body "<APP_ID>"
-gh secret set PROJECT_APP_PRIVATE_KEY --org ebravo-br --visibility all --body "$(cat path/to/key.pem)"
+gh secret set PROJECT_APP_ID         --org tramar-br --visibility all --body "<APP_ID>"
+gh secret set PROJECT_APP_PRIVATE_KEY --org tramar-br --visibility all --body "$(cat path/to/key.pem)"
 ```
 
-> Para repos da `tramar-br` que reutilizam estes workflows, as **mesmas** secrets precisam estar cadastradas na org `tramar-br` também (ver `setup-pipeline-tramar`).
+> **Importante**: o **mesmo** App ID e a **mesma** private key precisam estar cadastrados nas duas orgs. Não criar um App por org — é um App único, instalado em ambas.
 
 ---
 
@@ -527,9 +532,9 @@ gh secret set PROJECT_APP_PRIVATE_KEY --org ebravo-br --visibility all --body "$
 Exibir uma tabela com o status de cada item:
 
 ```
-Repo:     ebravo-br/<repo>
+Repo:     tramar-br/<repo>
 
-Workflows
+Workflows (todos apontam para ebravo-br/cicd-templates@v1)
 .github/workflows/ci.yml                       ✓ criado | ✓ atualizado
 .github/workflows/deploy.yml                   ✓ criado | ✓ atualizado
 .github/workflows/rollback.yml                 ✓ criado | ✓ atualizado
@@ -540,6 +545,7 @@ Workflows
 Infra
 infra/docker/Dockerfile                        ✓ criado | ✓ movido de <origem> | ⚠ ausente
 infra/compose/docker-compose.yml               ✓ movido da raiz | — nao havia
+
 GitHub
 Branch protection (main)                       ✓ configurada
 Org secrets (AWS + SSH)                        ✓ ok | ⚠ faltam: [lista]
@@ -547,71 +553,10 @@ Org secret GH_TOKEN_BUMP                       ✓ ok | ⚠ ausente — bump de 
 Org secrets PROJECT_APP_ID + _PRIVATE_KEY      ✓ ok | ⚠ ausente — automacao de projeto nao vai funcionar
 Org variable DEPLOY_PROD_ALLOWED               ✓ ok | ⚠ ausente
 
+Cross-org (lembretes manuais)
+GitHub App instalado em tramar-br              [verificar manualmente]
+Repo linkado ao projeto "Ebravo Projetos"      [verificar manualmente — para aparecer na UI de criar issue]
+
 Proximos passos:
 - [listar apenas o que ficou pendente]
 ```
-
----
-
-## Pré-requisitos: GitHub App (uma vez só)
-
-Estas etapas são **manuais** e fora do escopo do `/setup-pipeline` (rodam só uma vez por conta da org). São necessárias para que a automação do projeto "Ebravo Projetos" funcione cross-org (`ebravo-br` + `tramar-br`).
-
-### 1. Criar o GitHub App
-
-1. Como admin de `ebravo-br`, acessar:
-   `github.com/organizations/ebravo-br/settings/apps/new`
-2. Preencher:
-   - **GitHub App name**: `Ebravo Project Automation`
-   - **Homepage URL**: qualquer URL válida (ex: link do repo `cicd-templates`)
-   - **Webhook**: **desativar** (não precisamos receber eventos; chamamos o App via workflow)
-3. **Repository permissions**:
-   - Contents: **Read**
-   - Issues: **Read**
-   - Pull requests: **Read**
-   - Metadata: **Read** (default)
-4. **Organization permissions**:
-   - Projects: **Read and write**
-   - Members: **Read** (necessário para resolver users em itens do projeto)
-5. **Where can this GitHub App be installed?**: `Any account`
-6. Criar o App.
-
-### 2. Gerar a Private Key
-
-Na página do App → **Private keys** → **Generate a private key** → baixar o `.pem`.
-
-### 3. Instalar nas duas orgs
-
-Na página do App → **Install App** → instalar em **`ebravo-br`** e em **`tramar-br`**, com acesso a **All repositories** (ou pelo menos os repos que vão usar os workflows e os repos cujas issues entram no projeto).
-
-### 4. Dar acesso de escrita ao projeto "Ebravo Projetos"
-
-Em `github.com/orgs/ebravo-br/projects/2/settings` → **Manage access** → adicionar o GitHub App `Ebravo Project Automation` com permissão **Write** (ou **Admin**).
-
-### 5. Cadastrar as secrets nas duas orgs
-
-```bash
-APP_ID="<numeric-app-id>"
-PEM="$(cat path/to/key.pem)"
-
-gh secret set PROJECT_APP_ID         --org ebravo-br --visibility all --body "$APP_ID"
-gh secret set PROJECT_APP_PRIVATE_KEY --org ebravo-br --visibility all --body "$PEM"
-
-gh secret set PROJECT_APP_ID         --org tramar-br --visibility all --body "$APP_ID"
-gh secret set PROJECT_APP_PRIVATE_KEY --org tramar-br --visibility all --body "$PEM"
-```
-
-### 6. Linkar repos da `tramar-br` ao projeto
-
-Para que apareçam na UI ao criar uma issue diretamente do projeto:
-
-`github.com/orgs/ebravo-br/projects/2/settings` → **Manage repositories** → adicionar os repos da `tramar-br` que devem ser selecionáveis.
-
-> A automação `issue-epic.yml` já adiciona automaticamente issues criadas nos repos da `tramar-br` (via `secrets: inherit` + App). Linkar o repo é só para a UX de **criar issue** direto do projeto.
-
-### 7. Habilitar acesso cross-org ao `cicd-templates`
-
-Para que repos da `tramar-br` consigam invocar `uses: ebravo-br/cicd-templates/...@v1`:
-
-- **Opção A (recomendada)**: tornar `ebravo-br/cicd-templates` **público**.
-- **Opção B**: manter privado, mas só funciona se as duas orgs estiverem na **mesma Enterprise** e o repo estiver com `Settings → Actions → Access → Accessible from repositories owned by users in '<enterprise>'`.

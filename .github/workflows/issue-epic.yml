@@ -7,16 +7,26 @@
 #  Invocado pelo stub de cada repo via:
 #      jobs.epic.uses: ebravo-br/cicd-templates/.github/workflows/issue-epic.yml@v1
 #
+#  Funciona cross-org: qualquer repo de ebravo-br ou tramar-br pode
+#  invocar este workflow. As issues caem no projeto "Ebravo Projetos"
+#  (numero 2, owner ebravo-br).
+#
 #  Comportamento ao criar uma nova Issue:
-#    1. Adiciona a issue ao projeto da org
-#    2. Define Status = "A Fazer"
-#    3. Define campo "Épico" com base no prefixo do nome do repo:
-#         ebdocs-*  ->  EBDOCS
-#         ebcare-*  ->  EBCARE
-#         tramar-*  ->  TRAMAR
+#    1. Adiciona a issue ao projeto "Ebravo Projetos"
+#    2. Define Status = "Backlog"
+#    3. Define campo "Épico" com base em:
+#         owner = tramar-br        ->  TRAMAR
+#         nome  prefixo ebdocs-*   ->  EBDOCS
+#         nome  prefixo ebcare-*   ->  EBCARE
+#         nome  prefixo tramar-*   ->  TRAMAR
 #         (sem match) -> apenas adiciona ao projeto sem definir épico
 #
-#  Secret necessario: PROJECT_PAT (escopo project + repo + read:org)
+#  Auth: GitHub App "Ebravo Project Automation"
+#    - Org secrets necessarios na org do CALLER (ebravo-br e tramar-br):
+#        PROJECT_APP_ID
+#        PROJECT_APP_PRIVATE_KEY
+#    - O App precisa estar instalado em ambas as orgs e ter acesso de
+#      escrita ao projeto "Ebravo Projetos".
 # =====================================================================
 name: Issue Epic Assignment - Reusable
 
@@ -28,31 +38,41 @@ permissions:
 
 env:
   PROJECT_NUMBER: "2"
-  ORG:            "ebravo-br"
+  PROJECT_ORG:    "ebravo-br"
 
 jobs:
   assign-epic:
     name: Atribuir épico à issue
     runs-on: ubuntu-latest
     steps:
-      - name: Detectar épico pelo nome do repo
+      - name: Detectar épico pelo owner/nome do repo
         id: epic
         run: |
+          OWNER="${{ github.event.repository.owner.login }}"
           REPO_NAME="${{ github.event.repository.name }}"
           REPO_LC="${REPO_NAME,,}"
-          if   [[ "$REPO_LC" == ebdocs* ]]; then echo "epic=EBDOCS" >> "$GITHUB_OUTPUT"
-          elif [[ "$REPO_LC" == ebcare* ]]; then echo "epic=EBCARE" >> "$GITHUB_OUTPUT"
-          elif [[ "$REPO_LC" == tramar* ]]; then echo "epic=TRAMAR" >> "$GITHUB_OUTPUT"
+          if   [ "$OWNER" = "tramar-br" ];      then echo "epic=TRAMAR" >> "$GITHUB_OUTPUT"
+          elif [[ "$REPO_LC" == ebdocs* ]];     then echo "epic=EBDOCS" >> "$GITHUB_OUTPUT"
+          elif [[ "$REPO_LC" == ebcare* ]];     then echo "epic=EBCARE" >> "$GITHUB_OUTPUT"
+          elif [[ "$REPO_LC" == tramar* ]];     then echo "epic=TRAMAR" >> "$GITHUB_OUTPUT"
           else echo "epic=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Gerar token do GitHub App (scoped no owner do projeto)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id:      ${{ secrets.PROJECT_APP_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          owner:       ${{ env.PROJECT_ORG }}
+
       - name: Adicionar issue ao projeto e atribuir épico
         env:
-          GH_TOKEN:       ${{ secrets.PROJECT_PAT }}
+          GH_TOKEN:       ${{ steps.app-token.outputs.token }}
           EPIC:           ${{ steps.epic.outputs.epic }}
           ISSUE_ID:       ${{ github.event.issue.node_id }}
           ISSUE_NUMBER:   ${{ github.event.issue.number }}
-          ORG:            ${{ env.ORG }}
+          ORG:            ${{ env.PROJECT_ORG }}
           PROJECT_NUMBER: ${{ env.PROJECT_NUMBER }}
         run: |
           set -euo pipefail
@@ -109,7 +129,8 @@ jobs:
           status_field = find_field('Status')
           epic_field   = find_field('Épico')
 
-          # Adicionar issue ao projeto
+          # Adicionar issue ao projeto (cross-org: o issue_id pode ser
+          # de uma issue em tramar-br; o App precisa estar instalado la).
           add_data = gql('''
             mutation($projectId: ID!, $contentId: ID!) {
               addProjectV2ItemById(input: {
