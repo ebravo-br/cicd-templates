@@ -7,11 +7,12 @@ reaproveitando os workflows reutilizáveis que vivem em
 Cria os stubs de workflow, o `pipeline.yml`, proteção de branch e
 verifica secrets/variáveis da org `tramar-br`.
 
-> **Pré-requisito (uma vez só)**: o GitHub App **"Ebravo Project Automation"**
-> precisa estar criado em `ebravo-br`, instalado em `ebravo-br` e `tramar-br`,
-> com escrita no projeto "Ebravo Projetos" (#2). Ver a seção
-> [Pré-requisitos: GitHub App](setup-pipeline.md#pré-requisitos-github-app-uma-vez-só)
-> em `setup-pipeline`. Sem isso, as automações de projeto não funcionam.
+> **Pré-requisito (uma vez só)**: a org `tramar-br` precisa ter a secret
+> `PROJECT_PAT` cadastrada (mesma value que está em `ebravo-br`), porque
+> a automação de projeto cross-org exige um PAT scoped no usuário (membro
+> das duas orgs) — GitHub Apps não conseguem cruzar org boundaries em
+> uma única chamada `addProjectV2ItemById`. Sem isso, as automações de
+> projeto não funcionam para repos da `tramar-br`.
 
 ## Input: $ARGUMENTS
 
@@ -246,8 +247,7 @@ jobs:
   project:
     uses: ebravo-br/cicd-templates/.github/workflows/project-automation.yml@v1
     secrets:
-      PROJECT_APP_ID:          ${{ secrets.PROJECT_APP_ID }}
-      PROJECT_APP_PRIVATE_KEY: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+      PROJECT_PAT: ${{ secrets.PROJECT_PAT }}
 ```
 
 > **Por que não `secrets: inherit`?** Cross-org (`tramar-br` chamando reusable em `ebravo-br/cicd-templates`) o GitHub não propaga secrets via `inherit`. Precisa passar explicitamente.
@@ -276,8 +276,7 @@ jobs:
   epic:
     uses: ebravo-br/cicd-templates/.github/workflows/issue-epic.yml@v1
     secrets:
-      PROJECT_APP_ID:          ${{ secrets.PROJECT_APP_ID }}
-      PROJECT_APP_PRIVATE_KEY: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+      PROJECT_PAT: ${{ secrets.PROJECT_PAT }}
 ```
 
 ---
@@ -493,7 +492,7 @@ Checar se as secrets obrigatórias existem na org `tramar-br`:
 gh api orgs/tramar-br/actions/secrets | jq '[.secrets[].name]'
 ```
 
-Secrets esperadas: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SSH_KEY_HOMOL`, `SSH_KEY_PROD`, `GH_TOKEN_BUMP`, `PROJECT_APP_ID`, `PROJECT_APP_PRIVATE_KEY`
+Secrets esperadas: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SSH_KEY_HOMOL`, `SSH_KEY_PROD`, `GH_TOKEN_BUMP`, `PROJECT_PAT`
 
 Checar variável de controle de acesso:
 ```bash
@@ -517,19 +516,17 @@ Se estiver ausente, instruir o usuário a:
 gh secret set GH_TOKEN_BUMP --org tramar-br --visibility all --body "<TOKEN>"
 ```
 
-**Secrets `PROJECT_APP_ID` + `PROJECT_APP_PRIVATE_KEY` — obrigatórias para automação do GitHub Projects funcionar**
+**Secret `PROJECT_PAT` — obrigatória para automação do GitHub Projects funcionar**
 
-A automação de Kanban (mover issues, atribuir épicos, centralizar issues no projeto "Ebravo Projetos") usa um **GitHub App** instalado em `ebravo-br` e `tramar-br`. As secrets armazenam o App ID e a private key e precisam estar presentes na org `tramar-br` (igual à `ebravo-br`). Os stubs de `tramar-br` passam essas secrets **explicitamente** para os reusables em `ebravo-br/cicd-templates` (ver passos 3c/3d) — `secrets: inherit` não funciona em chamada cross-org de reusable workflow.
+A automação de Kanban (centralizar issues/PRs no projeto "Ebravo Projetos") cross-org exige um PAT scoped no usuário (membro de `ebravo-br` E `tramar-br`). GitHub Apps **não** funcionam aqui: a chamada `addProjectV2ItemById` precisa de um único token que veja a issue (na org caller) e o project (em outra org), e tokens de App são single-installation. Stubs de `tramar-br` passam `PROJECT_PAT` **explicitamente** ao reusable (ver passos 3c/3d) — `secrets: inherit` não propaga cross-org.
 
-Pré-requisito: o App **"Ebravo Project Automation"** já deve estar criado e instalado nas duas orgs. Se ainda não estiver, ver a seção [Pré-requisitos: GitHub App](setup-pipeline.md#pré-requisitos-github-app-uma-vez-só) em `setup-pipeline`.
+Pré-requisito: a mesma value de `PROJECT_PAT` que existe em `ebravo-br` precisa estar cadastrada também em `tramar-br`. Se ainda não estiver:
 
-Se estiverem ausentes, instruir o usuário a cadastrar:
 ```bash
-gh secret set PROJECT_APP_ID         --org tramar-br --visibility all --body "<APP_ID>"
-gh secret set PROJECT_APP_PRIVATE_KEY --org tramar-br --visibility all --body "$(cat path/to/key.pem)"
+gh secret set PROJECT_PAT --org tramar-br --visibility all --body "<TOKEN>"
 ```
 
-> **Importante**: o **mesmo** App ID e a **mesma** private key precisam estar cadastrados nas duas orgs. Não criar um App por org — é um App único, instalado em ambas.
+Onde `<TOKEN>` é PAT clássico (`github.com/settings/tokens` → Generate classic) com escopos `project`, `repo`, `read:org`, criado por usuário membro das duas orgs.
 
 ---
 
@@ -556,12 +553,12 @@ GitHub
 Branch protection (main)                       ✓ configurada
 Org secrets (AWS + SSH)                        ✓ ok | ⚠ faltam: [lista]
 Org secret GH_TOKEN_BUMP                       ✓ ok | ⚠ ausente — bump de versao nao vai funcionar
-Org secrets PROJECT_APP_ID + _PRIVATE_KEY      ✓ ok | ⚠ ausente — automacao de projeto nao vai funcionar
+Org secret PROJECT_PAT                         ✓ ok | ⚠ ausente — automacao de projeto nao vai funcionar
 Org variable DEPLOY_PROD_ALLOWED               ✓ ok | ⚠ ausente
 
 Cross-org (lembretes manuais)
-GitHub App instalado em tramar-br              [verificar manualmente]
-Repo linkado ao projeto "Ebravo Projetos"      [verificar manualmente — para aparecer na UI de criar issue]
+PROJECT_PAT presente em tramar-br              [conferido acima]
+Repo NAO pode ser linkado ao project          [limitacao GitHub: linkProjectV2ToRepository e same-owner only]
 
 Proximos passos:
 - [listar apenas o que ficou pendente]

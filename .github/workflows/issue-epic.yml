@@ -21,21 +21,20 @@
 #         nome  prefixo tramar-*   ->  TRAMAR
 #         (sem match) -> apenas adiciona ao projeto sem definir épico
 #
-#  Auth: GitHub App "Ebravo Project Automation"
-#    - Org secrets necessarios na org do CALLER (ebravo-br e tramar-br):
-#        PROJECT_APP_ID
-#        PROJECT_APP_PRIVATE_KEY
-#    - O App precisa estar instalado em ambas as orgs e ter acesso de
-#      escrita ao projeto "Ebravo Projetos".
+#  Auth: PROJECT_PAT (PAT classico, escopo project + repo + read:org).
+#    - Org secret necessario na org do CALLER (ebravo-br e tramar-br).
+#    - PAT scoped no usuario que e membro das duas orgs — necessario
+#      para resolver issue de uma org e mutar project de outra org
+#      numa mesma chamada (limitacao do GitHub Apps).
+#    - Stubs cross-org passam PROJECT_PAT explicitamente; secrets:inherit
+#      nao funciona em chamada cross-org de reusable workflow.
 # =====================================================================
 name: Issue Epic Assignment - Reusable
 
 on:
   workflow_call:
     secrets:
-      PROJECT_APP_ID:
-        required: true
-      PROJECT_APP_PRIVATE_KEY:
+      PROJECT_PAT:
         required: true
 
 permissions:
@@ -63,17 +62,9 @@ jobs:
           else echo "epic=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Gerar token do GitHub App (scoped no owner do projeto)
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id:      ${{ secrets.PROJECT_APP_ID }}
-          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
-          owner:       ${{ env.PROJECT_ORG }}
-
       - name: Adicionar issue ao projeto e atribuir épico
         env:
-          GH_TOKEN:       ${{ steps.app-token.outputs.token }}
+          GH_TOKEN:       ${{ secrets.PROJECT_PAT }}
           EPIC:           ${{ steps.epic.outputs.epic }}
           ISSUE_ID:       ${{ github.event.issue.node_id }}
           ISSUE_NUMBER:   ${{ github.event.issue.number }}
@@ -134,8 +125,8 @@ jobs:
           status_field = find_field('Status')
           epic_field   = find_field('Épico')
 
-          # Adicionar issue ao projeto (cross-org: o issue_id pode ser
-          # de uma issue em tramar-br; o App precisa estar instalado la).
+          # Adicionar issue ao projeto (cross-org: PAT do usuario ve a
+          # issue de qualquer org da qual ele e membro).
           add_data = gql('''
             mutation($projectId: ID!, $contentId: ID!) {
               addProjectV2ItemById(input: {

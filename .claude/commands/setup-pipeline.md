@@ -478,7 +478,7 @@ Checar se as secrets obrigatórias existem na org:
 gh api orgs/ebravo-br/actions/secrets | jq '[.secrets[].name]'
 ```
 
-Secrets esperadas: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SSH_KEY_HOMOL`, `SSH_KEY_PROD`, `GH_TOKEN_BUMP`, `PROJECT_APP_ID`, `PROJECT_APP_PRIVATE_KEY`
+Secrets esperadas: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SSH_KEY_HOMOL`, `SSH_KEY_PROD`, `GH_TOKEN_BUMP`, `PROJECT_PAT`
 
 Checar variável de controle de acesso:
 ```bash
@@ -502,23 +502,23 @@ Se estiver ausente, instruir o usuário a:
 gh secret set GH_TOKEN_BUMP --org ebravo-br --visibility all --body "<TOKEN>"
 ```
 
-**Secrets `PROJECT_APP_ID` + `PROJECT_APP_PRIVATE_KEY` — obrigatórias para automação do GitHub Projects funcionar**
+**Secret `PROJECT_PAT` — obrigatória para automação do GitHub Projects funcionar**
 
-O `GITHUB_TOKEN` nativo não tem permissão de escrita em Projects v2. As automações de Kanban (mover issues, atribuir épicos, centralizar repos cross-org no projeto "Ebravo Projetos") usam um **GitHub App** instalado nas duas orgs (`ebravo-br` e `tramar-br`).
+O `GITHUB_TOKEN` nativo não tem permissão de escrita em Projects v2. A automação de Kanban (mover issues, atribuir épicos, centralizar issues cross-org no projeto "Ebravo Projetos") usa um PAT clássico scoped no usuário (membro de `ebravo-br` E `tramar-br`).
 
-Pré-requisito: o App **"Ebravo Project Automation"** já deve estar criado e instalado em ambas as orgs. Se não estiver, ver a seção [Pré-requisitos: GitHub App](#pré-requisitos-github-app-uma-vez-só) abaixo.
+> **Por que não GitHub App?** Tokens de App são single-installation: um token vê só uma org. A chamada `addProjectV2ItemById` cross-org precisa de **um único** token que enxergue tanto a issue (na org caller) quanto o project (em outra org) — só PAT do usuário consegue.
 
-Se as secrets estiverem ausentes, instruir o usuário a:
+Se a secret estiver ausente, instruir o usuário a:
 
-1. Pegar o **App ID** (numérico) na página do App em `github.com/organizations/ebravo-br/settings/apps/<app-slug>`.
-2. Gerar (ou usar a chave já gerada) o **Private Key** (`.pem`) na mesma página.
-3. Cadastrar as duas secrets na org:
+1. Acessar `github.com/settings/tokens` → **Generate new token (classic)**
+   - Note: `PROJECT_PAT`
+   - Scopes: `project`, `repo`, `read:org`
+2. Cadastrar na org:
 ```bash
-gh secret set PROJECT_APP_ID         --org ebravo-br --visibility all --body "<APP_ID>"
-gh secret set PROJECT_APP_PRIVATE_KEY --org ebravo-br --visibility all --body "$(cat path/to/key.pem)"
+gh secret set PROJECT_PAT --org ebravo-br --visibility all --body "<TOKEN>"
 ```
 
-> Para repos da `tramar-br` que reutilizam estes workflows, as **mesmas** secrets precisam estar cadastradas na org `tramar-br` também (ver `setup-pipeline-tramar`).
+> Para repos da `tramar-br` que reutilizam estes workflows, a **mesma** secret precisa estar cadastrada na org `tramar-br` também (ver `setup-pipeline-tramar`).
 
 ---
 
@@ -544,7 +544,7 @@ GitHub
 Branch protection (main)                       ✓ configurada
 Org secrets (AWS + SSH)                        ✓ ok | ⚠ faltam: [lista]
 Org secret GH_TOKEN_BUMP                       ✓ ok | ⚠ ausente — bump de versao nao vai funcionar
-Org secrets PROJECT_APP_ID + _PRIVATE_KEY      ✓ ok | ⚠ ausente — automacao de projeto nao vai funcionar
+Org secret PROJECT_PAT                         ✓ ok | ⚠ ausente — automacao de projeto nao vai funcionar
 Org variable DEPLOY_PROD_ALLOWED               ✓ ok | ⚠ ausente
 
 Proximos passos:
@@ -553,65 +553,33 @@ Proximos passos:
 
 ---
 
-## Pré-requisitos: GitHub App (uma vez só)
+## Pré-requisitos cross-org (uma vez só)
 
-Estas etapas são **manuais** e fora do escopo do `/setup-pipeline` (rodam só uma vez por conta da org). São necessárias para que a automação do projeto "Ebravo Projetos" funcione cross-org (`ebravo-br` + `tramar-br`).
+Estas etapas são **manuais** e fora do escopo do `/setup-pipeline`. Necessárias para que a automação do projeto "Ebravo Projetos" funcione com repos das duas orgs.
 
-### 1. Criar o GitHub App
+### 1. Criar o `PROJECT_PAT`
 
-1. Como admin de `ebravo-br`, acessar:
-   `github.com/organizations/ebravo-br/settings/apps/new`
-2. Preencher:
-   - **GitHub App name**: `Ebravo Project Automation`
-   - **Homepage URL**: qualquer URL válida (ex: link do repo `cicd-templates`)
-   - **Webhook**: **desativar** (não precisamos receber eventos; chamamos o App via workflow)
-3. **Repository permissions**:
-   - Contents: **Read**
-   - Issues: **Read**
-   - Pull requests: **Read**
-   - Metadata: **Read** (default)
-4. **Organization permissions**:
-   - Projects: **Read and write**
-   - Members: **Read** (necessário para resolver users em itens do projeto)
-5. **Where can this GitHub App be installed?**: `Any account`
-6. Criar o App.
+1. Usuário membro de **ebravo-br** E **tramar-br** acessa `github.com/settings/tokens` → **Generate new token (classic)**
+   - Note: `PROJECT_PAT`
+   - Scopes: `project`, `repo`, `read:org`
+   - Expiração: **No expiration** (ou rotacionar manualmente)
 
-### 2. Gerar a Private Key
-
-Na página do App → **Private keys** → **Generate a private key** → baixar o `.pem`.
-
-### 3. Instalar nas duas orgs
-
-Na página do App → **Install App** → instalar em **`ebravo-br`** e em **`tramar-br`**, com acesso a **All repositories** (ou pelo menos os repos que vão usar os workflows e os repos cujas issues entram no projeto).
-
-### 4. Dar acesso de escrita ao projeto "Ebravo Projetos"
-
-Em `github.com/orgs/ebravo-br/projects/2/settings` → **Manage access** → adicionar o GitHub App `Ebravo Project Automation` com permissão **Write** (ou **Admin**).
-
-### 5. Cadastrar as secrets nas duas orgs
+2. Cadastrar a **mesma value** em ambas as orgs:
 
 ```bash
-APP_ID="<numeric-app-id>"
-PEM="$(cat path/to/key.pem)"
-
-gh secret set PROJECT_APP_ID         --org ebravo-br --visibility all --body "$APP_ID"
-gh secret set PROJECT_APP_PRIVATE_KEY --org ebravo-br --visibility all --body "$PEM"
-
-gh secret set PROJECT_APP_ID         --org tramar-br --visibility all --body "$APP_ID"
-gh secret set PROJECT_APP_PRIVATE_KEY --org tramar-br --visibility all --body "$PEM"
+gh secret set PROJECT_PAT --org ebravo-br --visibility all --body "<TOKEN>"
+gh secret set PROJECT_PAT --org tramar-br --visibility all --body "<TOKEN>"
 ```
 
-### 6. Linkar repos da `tramar-br` ao projeto
-
-Para que apareçam na UI ao criar uma issue diretamente do projeto:
-
-`github.com/orgs/ebravo-br/projects/2/settings` → **Manage repositories** → adicionar os repos da `tramar-br` que devem ser selecionáveis.
-
-> A automação `issue-epic.yml` já adiciona automaticamente issues criadas nos repos da `tramar-br` (via `secrets: inherit` + App). Linkar o repo é só para a UX de **criar issue** direto do projeto.
-
-### 7. Habilitar acesso cross-org ao `cicd-templates`
+### 2. Habilitar acesso cross-org ao `cicd-templates`
 
 Para que repos da `tramar-br` consigam invocar `uses: ebravo-br/cicd-templates/...@v1`:
 
 - **Opção A (recomendada)**: tornar `ebravo-br/cicd-templates` **público**.
-- **Opção B**: manter privado, mas só funciona se as duas orgs estiverem na **mesma Enterprise** e o repo estiver com `Settings → Actions → Access → Accessible from repositories owned by users in '<enterprise>'`.
+- **Opção B**: manter privado, mas só funciona se as duas orgs estiverem na **mesma Enterprise** com `Settings → Actions → Access` configurado.
+
+### Limitações cross-org conhecidas
+
+- **Não dá para linkar repos da `tramar-br` ao project "Ebravo Projetos"** via `linkProjectV2ToRepository` — o GitHub bloqueia ("Only projects owned by the same owner as the repository can be linked"). Logo, a tela "Create new issue" do project nunca lista repos da `tramar-br`. Workaround: criar a issue direto no repo (`github.com/tramar-br/<repo>/issues/new`); `issue-epic.yml` adiciona automaticamente ao project.
+
+- **GitHub Apps não funcionam para esta automação cross-org**: tokens de App são single-installation. A chamada `addProjectV2ItemById` precisa de um único token que veja issue + project (em orgs diferentes), o que só PAT scoped no usuário consegue.

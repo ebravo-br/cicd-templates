@@ -19,21 +19,20 @@
 #  que captura issues linkadas pelo corpo do PR ("closes #N") E pelo
 #  sidebar "Development" — sem depender do formato do body.
 #
-#  Auth: GitHub App "Ebravo Project Automation"
-#    - Org secrets necessarios na org do CALLER (ebravo-br e tramar-br):
-#        PROJECT_APP_ID
-#        PROJECT_APP_PRIVATE_KEY
-#    - O App precisa estar instalado em ambas as orgs e ter acesso de
-#      escrita ao projeto "Ebravo Projetos".
+#  Auth: PROJECT_PAT (PAT classico, escopo project + repo + read:org).
+#    - Org secret necessario na org do CALLER (ebravo-br e tramar-br).
+#    - PAT scoped no usuario que e membro das duas orgs — necessario
+#      para resolver issue/PR de uma org e mutar project de outra org
+#      numa mesma chamada (limitacao do GitHub Apps).
+#    - Stubs cross-org passam PROJECT_PAT explicitamente; secrets:inherit
+#      nao funciona em chamada cross-org de reusable workflow.
 # =====================================================================
 name: Project Automation - Reusable
 
 on:
   workflow_call:
     secrets:
-      PROJECT_APP_ID:
-        required: true
-      PROJECT_APP_PRIVATE_KEY:
+      PROJECT_PAT:
         required: true
 
 permissions:
@@ -84,20 +83,10 @@ jobs:
             echo "status=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Gerar token do GitHub App (scoped no owner do projeto)
-        if: steps.target.outputs.status != ''
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id:      ${{ secrets.PROJECT_APP_ID }}
-          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
-          owner:       ${{ env.PROJECT_ORG }}
-
       - name: Mover issues vinculadas
         if: steps.target.outputs.status != ''
         env:
-          GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
-          APP_TOKEN:      ${{ steps.app-token.outputs.token }}
+          GH_TOKEN:       ${{ secrets.PROJECT_PAT }}
           TARGET_STATUS:  ${{ steps.target.outputs.status }}
           PR_NUMBER:      ${{ github.event.pull_request.number }}
           ORG:            ${{ env.PROJECT_ORG }}
@@ -114,17 +103,12 @@ jobs:
           project_number = int(os.environ['PROJECT_NUMBER'])
           target_status  = os.environ['TARGET_STATUS']
           repo           = os.environ['REPO']
-          gh_token       = os.environ['GITHUB_TOKEN']
-          app_token      = os.environ['APP_TOKEN']
 
-          def gql(query, variables=None, token=None):
+          def gql(query, variables=None):
               payload = json.dumps({'query': query, 'variables': variables or {}})
-              env = os.environ.copy()
-              if token:
-                  env['GH_TOKEN'] = token
               r = subprocess.run(
                   ['gh', 'api', 'graphql', '--input', '-'],
-                  input=payload.encode(), capture_output=True, env=env
+                  input=payload.encode(), capture_output=True
               )
               data = json.loads(r.stdout)
               if 'errors' in data:
@@ -135,8 +119,6 @@ jobs:
           repo_owner, repo_name = repo.split('/')
 
           # 1) Buscar issues vinculadas ao PR via closingIssuesReferences.
-          #    Usa GITHUB_TOKEN (nativo) — tem acesso ao calling repo
-          #    independente da org (ebravo-br ou tramar-br).
           pr_data = gql('''
             query($owner: String!, $repo: String!, $num: Int!) {
               repository(owner: $owner, name: $repo) {
@@ -152,16 +134,14 @@ jobs:
                 }
               }
             }
-          ''', {'owner': repo_owner, 'repo': repo_name, 'num': pr_number}, token=gh_token)
+          ''', {'owner': repo_owner, 'repo': repo_name, 'num': pr_number})
 
           issues = pr_data['repository']['pullRequest']['closingIssuesReferences']['nodes']
           if not issues:
               print('::notice::Nenhuma issue vinculada ao PR. Vincule pelo sidebar "Development" ou use "closes #N" no corpo.')
               sys.exit(0)
 
-          # 2) Buscar projeto e campo Status. Daqui em diante, todas as
-          #    operacoes em Projects v2 usam o token do App (scoped em
-          #    ebravo-br, dono do projeto).
+          # 2) Buscar projeto e campo Status.
           proj_data = gql('''
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -178,7 +158,7 @@ jobs:
                 }
               }
             }
-          ''', {'org': org, 'num': project_number}, token=app_token)
+          ''', {'org': org, 'num': project_number})
 
           project    = proj_data['organization']['projectV2']
           project_id = project['id']
@@ -217,7 +197,7 @@ jobs:
                         projectId: $projectId, contentId: $contentId
                       }) { item { id } }
                     }
-                  ''', {'projectId': project_id, 'contentId': issue['id']}, token=app_token)
+                  ''', {'projectId': project_id, 'contentId': issue['id']})
                   item_id = add_data['addProjectV2ItemById']['item']['id']
                   print(f'::notice::Issue #{issue["number"]} adicionada ao projeto.')
               else:
@@ -233,6 +213,6 @@ jobs:
               ''', {
                 'projectId': project_id, 'itemId': item_id,
                 'fieldId': status_field_id, 'optionId': option_id
-              }, token=app_token)
+              })
               print(f'::notice::Issue #{issue["number"]} ({issue["title"]}) -> "{target_status}".')
           PY
