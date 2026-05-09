@@ -116,12 +116,14 @@ jobs:
         run: |
           NV="${{ matrix.node }}"; NV="${NV#node}"
           echo "v=${NV:-${{ env.DEFAULT_NODE }}}" >> "$GITHUB_OUTPUT"
+          LOCKFILE="${{ matrix.context }}/package-lock.json"
+          [ -f "$LOCKFILE" ] && echo "cache=npm" >> "$GITHUB_OUTPUT" || echo "cache=" >> "$GITHUB_OUTPUT"
 
       - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.nodever.outputs.v }}
-          cache: 'npm'
+          cache: ${{ steps.nodever.outputs.cache }}
           cache-dependency-path: ${{ matrix.context }}/package-lock.json
 
       - name: NPM install + build
