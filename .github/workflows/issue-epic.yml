@@ -24,6 +24,7 @@
 #         nome  contem  atos       ->  ATOS
 #         nome  prefixo datapat-*  ->  DATAPAT
 #         nome  prefixo totem-*    ->  TOTEM
+#         nome  prefixo acg-*      ->  ACG
 #         (sem match) -> apenas adiciona ao projeto sem definir épico
 #
 #  Auth: PROJECT_PAT (PAT classico, escopo project + repo + read:org).
@@ -69,6 +70,7 @@ jobs:
           elif [[ "$REPO_LC" == *atos* ]];          then echo "epic=ATOS"      >> "$GITHUB_OUTPUT"
           elif [[ "$REPO_LC" == datapat* ]];        then echo "epic=DATAPAT"   >> "$GITHUB_OUTPUT"
           elif [[ "$REPO_LC" == totem* ]];          then echo "epic=TOTEM"     >> "$GITHUB_OUTPUT"
+          elif [[ "$REPO_LC" == acg* ]];            then echo "epic=ACG"       >> "$GITHUB_OUTPUT"
           else echo "epic=" >> "$GITHUB_OUTPUT"
           fi
 

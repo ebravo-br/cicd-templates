@@ -205,13 +205,13 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
       # ---- Toolchain --------------------------------------------------
-      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
         id: nodever
         run: |
           NV="${{ matrix.node }}"; NV="${NV#node}"
           echo "v=${NV:-${{ env.DEFAULT_NODE }}}" >> "$GITHUB_OUTPUT"
 
-      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.nodever.outputs.v }}
@@ -237,7 +237,7 @@ jobs:
 
       # ---- Build ------------------------------------------------------
       - name: Build — Node.js / Angular
-        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular'
+        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
         working-directory: ${{ matrix.context }}
         run: |
           if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
