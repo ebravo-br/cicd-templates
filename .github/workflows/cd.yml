@@ -10,10 +10,11 @@
 #  Trigger: apenas workflow_dispatch (gate manual — deploy e sempre intencional).
 #
 #  Realiza em sequencia por componente (max-parallel: 1):
-#    1. Build (compile/package)
-#    2. Bump de versao + commit [skip ci]
-#    3. Build e push da imagem Docker -> ECR
-#    4. Deploy SSH -> EC2
+#    1. Bump de versao (calcula + atualiza arquivo local)
+#    2. Build (compile/package ja com a nova versao)
+#    3. Commit do bump [skip ci]
+#    4. Build e push da imagem Docker -> ECR
+#    5. Deploy SSH -> EC2
 # =====================================================================
 
 name: CD - Reusable (Build + ECR + Deploy)
@@ -235,36 +236,6 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
-      # ---- Build ------------------------------------------------------
-      - name: Build — Node.js / Angular
-        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
-        working-directory: ${{ matrix.context }}
-        run: |
-          if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
-          else                              npm install --legacy-peer-deps; fi
-          if   npm run | grep -qE '^\s+build-homol' && [ "${{ inputs.target_env }}" = "homologacao" ]; then
-            npm run build-homol
-          elif npm run | grep -qE '^\s+build-prod'  && [ "${{ inputs.target_env }}" = "producao"    ]; then
-            npm run build-prod
-          else
-            npm run build --if-present
-          fi
-
-      - name: Build — Maven
-        if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
-        working-directory: ${{ matrix.context }}
-        run: |
-          if [ -x ./mvnw ]; then ./mvnw -B -DskipTests clean package
-          else                  mvn   -B -DskipTests clean package; fi
-
-      - name: Build — Python
-        if: matrix.tecnologia == 'python'
-        working-directory: ${{ matrix.context }}
-        run: |
-          python -m pip install --upgrade pip
-          [ -f requirements.txt ] && pip install -r requirements.txt || true
-          if [ -f pyproject.toml ]; then pip install build && python -m build; fi
-
       # ---- Bump de versao ---------------------------------------------
       - name: Calcular nova versao
         id: ver
@@ -317,6 +288,36 @@ jobs:
               node -e "const fs=require('fs'),f=process.env.VERSION_FILE;const j=JSON.parse(fs.readFileSync(f));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
               ;;
           esac
+
+      # ---- Build ------------------------------------------------------
+      - name: Build — Node.js / Angular
+        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
+          else                              npm install --legacy-peer-deps; fi
+          if   npm run | grep -qE '^\s+build-homol' && [ "${{ inputs.target_env }}" = "homologacao" ]; then
+            npm run build-homol
+          elif npm run | grep -qE '^\s+build-prod'  && [ "${{ inputs.target_env }}" = "producao"    ]; then
+            npm run build-prod
+          else
+            npm run build --if-present
+          fi
+
+      - name: Build — Maven
+        if: matrix.tecnologia == 'spring-boot-java' || matrix.tecnologia == 'java'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -x ./mvnw ]; then ./mvnw -B -DskipTests clean package
+          else                  mvn   -B -DskipTests clean package; fi
+
+      - name: Build — Python
+        if: matrix.tecnologia == 'python'
+        working-directory: ${{ matrix.context }}
+        run: |
+          python -m pip install --upgrade pip
+          [ -f requirements.txt ] && pip install -r requirements.txt || true
+          if [ -f pyproject.toml ]; then pip install build && python -m build; fi
 
       # ---- Commit do bump via REST API (bypass branch protection) --------
       - name: Commit do bump na branch
