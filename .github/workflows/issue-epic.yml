@@ -114,7 +114,7 @@ jobs:
               organization(login: $org) {
                 projectV2(number: $num) {
                   id
-                  fields(first: 20) {
+                  fields(first: 30) {
                     nodes {
                       ... on ProjectV2SingleSelectField {
                         id name
@@ -138,6 +138,7 @@ jobs:
 
           status_field = find_field('Status')
           epic_field   = find_field('Épico')
+          type_field   = find_field('Type')
 
           # Adicionar issue ao projeto (cross-org: PAT do usuario ve a
           # issue de qualquer org da qual ele e membro).
@@ -177,6 +178,7 @@ jobs:
               print(f'::notice::Issue #{issue_number} {label} -> "{option_name}".')
 
           set_field(status_field, 'Backlog', 'Status')
+          set_field(type_field, 'Feature', 'Type')
 
           if epic:
               set_field(epic_field, epic, 'Épico')
