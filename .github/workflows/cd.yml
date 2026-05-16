@@ -31,6 +31,11 @@ on:
         type: string
         required: false
         default: ec2
+      deploy_apps:
+        description: 'Componentes a deployar (monorepo): ambos | api | web'
+        type: string
+        required: false
+        default: ambos
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -108,6 +113,7 @@ jobs:
         shell: bash
         env:
           DEFAULT_PYTHON: ${{ env.DEFAULT_PYTHON }}
+          DEPLOY_APPS:    ${{ inputs.deploy_apps }}
         run: |
           set -euo pipefail
           [ -f .github/pipeline.yml ] || { echo "::error::.github/pipeline.yml nao encontrado"; exit 1; }
@@ -135,7 +141,11 @@ jobs:
           items = []
 
           if mono:
+              deploy_apps_raw = os.environ.get('DEPLOY_APPS', 'ambos').strip().lower()
+              deploy_apps = {'api', 'web'} if deploy_apps_raw == 'ambos' else {deploy_apps_raw}
               for app in ('api', 'web'):
+                  if app not in deploy_apps:
+                      continue
                   sub  = cfg.get(app) or {}
                   comp = g(sub, 'componente')
                   tec  = g(sub, 'tecnologia')
