@@ -257,7 +257,13 @@ jobs:
           set -euo pipefail
           STAMP=$(TZ=America/Sao_Paulo date +'%d%m%y%H%M%S')
           case "$TEC" in
-            spring-boot-java|java) CUR=$(grep -m1 -oP '(?<=<version>)[^<]+' "$VERSION_FILE") ;;
+            spring-boot-java|java) CUR=$(python3 -c "
+import re, os
+src = open(os.environ['VERSION_FILE']).read()
+src = re.sub(r'<parent>.*?</parent>', '', src, flags=re.DOTALL)
+m = re.search(r'<version>([^<]+)</version>', src)
+print(m.group(1) if m else '')
+") ;;
             python)                CUR=$(grep -m1 -oP '(?<=^version *= *")[^"]+' "$VERSION_FILE") ;;
             *)                     CUR=$(node -p "require('./'+process.env.VERSION_FILE).version") ;;
           esac
@@ -285,9 +291,15 @@ jobs:
           import os, re
           fp = os.environ['VERSION_FILE']; new = os.environ['NEW']
           src = open(fp).read()
-          src = re.sub(r'(<project[^>]*>.*?<version>)([^<]+)(</version>)',
-                       lambda m: m.group(1)+new+m.group(3),
-                       src, count=1, flags=re.DOTALL)
+          parent = re.search(r'<parent>.*?</parent>', src, re.DOTALL)
+          if parent:
+              after = src[parent.end():]
+              after = re.sub(r'(<version>)([^<]+)(</version>)',
+                             lambda m: m.group(1)+new+m.group(3), after, count=1)
+              src = src[:parent.end()] + after
+          else:
+              src = re.sub(r'(<version>)([^<]+)(</version>)',
+                           lambda m: m.group(1)+new+m.group(3), src, count=1)
           open(fp,'w').write(src)
           PY
               ;;
