@@ -261,9 +261,9 @@ jobs:
             python)                CUR=$(grep -m1 -oP '(?<=^version *= *")[^"]+' "$VERSION_FILE") ;;
             *)                     CUR=$(node -p "require('./'+process.env.VERSION_FILE).version") ;;
           esac
-          BASE=$(echo "$CUR" | sed -E 's/-SNAPSHOT_[0-9]+$//')
+          BASE=$(echo "$CUR" | sed -E 's/-SNAPSHOT[._][0-9]+$//')
           if [ "$ENV_TARGET" = "homologacao" ]; then
-            NEW="${BASE}-SNAPSHOT_${STAMP}"
+            NEW="${BASE}-SNAPSHOT.${STAMP}"
           else
             IFS='.' read -r A B C <<<"$BASE"
             NEW="${A}.$((B+1)).0"
