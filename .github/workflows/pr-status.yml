@@ -1,0 +1,179 @@
+# =====================================================================
+#  PR STATUS - REUSABLE WORKFLOW
+#
+#  Este arquivo vive em:
+#      ebravo-br/cicd-templates/.github/workflows/pr-status.yml
+#
+#  Invocado pelo stub de cada repo via:
+#      jobs.status.uses: ebravo-br/cicd-templates/.github/workflows/pr-status.yml@v1
+#
+#  Ao abrir um PR, detecta a issue vinculada pelo nome da branch:
+#      feature/1  bugfix/3  hotfix/7  task/2  1-slug-titulo
+#  Fallback: corpo do PR com "Closes/Fixes/Resolves #N"
+#
+#  Atualiza o Status da issue no projeto "Ebravo Projetos" para
+#  "Code Review".
+# =====================================================================
+name: PR Status - Reusable
+
+on:
+  workflow_call:
+    secrets:
+      PROJECT_PAT:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  PROJECT_NUMBER: "2"
+  PROJECT_ORG:    "ebravo-br"
+
+jobs:
+  set-code-review:
+    name: Status → Code Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Atualizar Status da issue para Code Review
+        env:
+          GH_TOKEN:       ${{ secrets.PROJECT_PAT }}
+          HEAD_BRANCH:    ${{ github.event.pull_request.head.ref }}
+          PR_BODY:        ${{ github.event.pull_request.body }}
+          OWNER:          ${{ github.event.repository.owner.login }}
+          REPO:           ${{ github.event.repository.name }}
+          ORG:            ${{ env.PROJECT_ORG }}
+          PROJECT_NUMBER: ${{ env.PROJECT_NUMBER }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, subprocess, json, sys, re
+
+          head_branch    = os.environ.get('HEAD_BRANCH', '')
+          pr_body        = os.environ.get('PR_BODY', '') or ''
+          repo_owner     = os.environ['OWNER']
+          repo_name      = os.environ['REPO']
+          org            = os.environ['ORG']
+          project_number = int(os.environ['PROJECT_NUMBER'])
+
+          # 1) branch feature/1, bugfix/42, hotfix/7, task/3
+          issue_number = None
+          m = re.match(r'^(?:feature|bugfix|hotfix|task)/(\d+)$', head_branch)
+          if m:
+              issue_number = int(m.group(1))
+
+          # 2) branch padrao GitHub: 123-slug-titulo
+          if not issue_number:
+              m2 = re.match(r'^(\d+)-', head_branch)
+              if m2:
+                  issue_number = int(m2.group(1))
+
+          # 3) corpo do PR: "Closes #123", "Fixes #42"...
+          if not issue_number:
+              m3 = re.search(r'(?:closes?|fixes?|resolves?)\s+#(\d+)',
+                             pr_body, re.IGNORECASE)
+              if m3:
+                  issue_number = int(m3.group(1))
+
+          if not issue_number:
+              print('::notice::Nenhuma issue vinculada encontrada — nenhuma acao.')
+              sys.exit(0)
+
+          def gql(query, variables=None):
+              payload = json.dumps({'query': query, 'variables': variables or {}})
+              r = subprocess.run(
+                  ['gh', 'api', 'graphql', '--input', '-'],
+                  input=payload.encode(), capture_output=True
+              )
+              data = json.loads(r.stdout)
+              if 'errors' in data:
+                  print(f'::error::GraphQL: {data["errors"]}', file=sys.stderr)
+                  sys.exit(1)
+              return data['data']
+
+          # Buscar projeto e campo Status
+          proj_data = gql('''
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 30) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id name
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ''', {'org': org, 'num': project_number})
+
+          project    = proj_data['organization']['projectV2']
+          project_id = project['id']
+
+          status_field = next(
+              (f for f in project['fields']['nodes'] if f.get('name') == 'Status'),
+              None
+          )
+          if not status_field:
+              print('::error::Campo Status nao encontrado no projeto.', file=sys.stderr)
+              sys.exit(1)
+
+          cr_opt = next(
+              (o for o in status_field['options']
+               if o['name'].lower() == 'code review'),
+              None
+          )
+          if not cr_opt:
+              print('::warning::Opcao "Code Review" nao encontrada em Status.')
+              sys.exit(0)
+
+          # Buscar issue e item no projeto
+          issue_data = gql('''
+            query($owner: String!, $repo: String!, $num: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $num) {
+                  id title
+                  projectItems(first: 10) {
+                    nodes {
+                      id
+                      project { id }
+                    }
+                  }
+                }
+              }
+            }
+          ''', {'owner': repo_owner, 'repo': repo_name, 'num': issue_number})
+
+          issue = issue_data['repository']['issue']
+          if not issue:
+              print(f'::warning::Issue #{issue_number} nao encontrada.')
+              sys.exit(0)
+
+          item_id = next(
+              (item['id'] for item in issue['projectItems']['nodes']
+               if item['project']['id'] == project_id),
+              None
+          )
+          if not item_id:
+              print(f'::notice::Issue #{issue_number} nao esta no projeto — nenhuma acao.')
+              sys.exit(0)
+
+          gql('''
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                value: { singleSelectOptionId: $optionId }
+              }) { projectV2Item { id } }
+            }
+          ''', {
+              'projectId': project_id,
+              'itemId':    item_id,
+              'fieldId':   status_field['id'],
+              'optionId':  cr_opt['id'],
+          })
+
+          print(f'::notice::Issue #{issue_number} "{issue["title"]}" -> Status: Code Review')
+          PY
