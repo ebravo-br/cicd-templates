@@ -139,22 +139,6 @@ jobs:
           status_field = find_field('Status')
           epic_field   = find_field('Épico')
 
-          # Buscar issue type "Feature" na org
-          type_data = gql('''
-            query($org: String!) {
-              organization(login: $org) {
-                issueTypes(first: 20) {
-                  nodes { id name }
-                }
-              }
-            }
-          ''', {'org': org})
-          feature_type_id = next(
-              (t['id'] for t in type_data['organization']['issueTypes']['nodes']
-               if t['name'].lower() == 'feature'),
-              None
-          )
-
           # Adicionar issue ao projeto (cross-org: PAT do usuario ve a
           # issue de qualquer org da qual ele e membro).
           add_data = gql('''
@@ -166,19 +150,6 @@ jobs:
           ''', {'projectId': project_id, 'contentId': issue_id})
           item_id = add_data['addProjectV2ItemById']['item']['id']
           print(f'::notice::Issue #{issue_number} adicionada ao projeto.')
-
-          # Definir Issue Type = Feature (campo nativo do GitHub, nao campo de projeto)
-          if feature_type_id:
-              gql('''
-                mutation($issueId: ID!, $typeId: ID!) {
-                  updateIssue(input: { id: $issueId, issueTypeId: $typeId }) {
-                    issue { id }
-                  }
-                }
-              ''', {'issueId': issue_id, 'typeId': feature_type_id})
-              print(f'::notice::Issue #{issue_number} Type -> "Feature".')
-          else:
-              print(f'::warning::Issue type "Feature" nao encontrado na org.')
 
           def set_field(field, option_name, label):
               if not field:
