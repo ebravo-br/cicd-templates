@@ -51,8 +51,8 @@ jobs:
       github.event.pull_request.merged == true &&
       (
         startsWith(github.event.pull_request.head.ref, 'feature/') ||
-        startsWith(github.event.pull_request.head.ref, 'bugfix/')  ||
-        startsWith(github.event.pull_request.head.ref, 'hotfix/')
+        startsWith(github.event.pull_request.head.ref, 'bug/')  ||
+        startsWith(github.event.pull_request.head.ref, 'task/')
       )
     permissions:
       contents: write

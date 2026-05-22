@@ -12,7 +12,7 @@
 #  issue), busca o tipo da issue e renomeia para `{tipo}/{numero}`:
 #
 #    Feature → feature/{N}
-#    Bug     → bugfix/{N}
+#    Bug     → bug/{N}
 #    Task    → task/{N}
 #
 #  Se a branch não seguir o padrão ou o tipo não for mapeado, encerra
@@ -94,7 +94,7 @@ jobs:
 
           TYPE_MAP = {
               'feature': 'feature',
-              'bug':     'bugfix',
+              'bug':     'bug',
               'task':    'task',
           }
 

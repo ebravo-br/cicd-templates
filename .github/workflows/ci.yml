@@ -8,7 +8,7 @@
 #      jobs.ci.uses: ebravo-br/cicd-templates/.github/workflows/ci.yml@v1
 #
 #  Triggers (do CALLER):
-#      push em feature/** | hotfix/** | bugfix/**  -> valida o build
+#      push em feature/** | bug/** | task/**  -> valida o build
 #
 #  Nao gera imagem Docker nem faz push para o ECR.
 #  Para deploy use cd.yml.

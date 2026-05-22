@@ -8,7 +8,7 @@
 #      jobs.status.uses: ebravo-br/cicd-templates/.github/workflows/pr-status.yml@v1
 #
 #  Ao abrir um PR, detecta a issue vinculada pelo nome da branch:
-#      feature/1  bugfix/3  hotfix/7  task/2  1-slug-titulo
+#      feature/1  bug/3  task/2  1-slug-titulo
 #  Fallback: corpo do PR com "Closes/Fixes/Resolves #N"
 #
 #  Atualiza o Status da issue no projeto "Ebravo Projetos" para
@@ -56,9 +56,9 @@ jobs:
           org            = os.environ['ORG']
           project_number = int(os.environ['PROJECT_NUMBER'])
 
-          # 1) branch feature/1, bugfix/42, hotfix/7, task/3
+          # 1) branch feature/1, bug/42, task/3
           issue_number = None
-          m = re.match(r'^(?:feature|bugfix|hotfix|task)/(\d+)$', head_branch)
+          m = re.match(r'^(?:feature|bug|task)/(\d+)$', head_branch)
           if m:
               issue_number = int(m.group(1))
 
