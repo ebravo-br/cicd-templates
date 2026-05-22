@@ -1,0 +1,123 @@
+# =====================================================================
+#  BRANCH NAMING - REUSABLE WORKFLOW
+#
+#  Este arquivo vive em:
+#      ebravo-br/cicd-templates/.github/workflows/branch-naming.yml
+#
+#  Invocado pelo stub de cada repo via:
+#      jobs.rename.uses: ebravo-br/cicd-templates/.github/workflows/branch-naming.yml@v1
+#
+#  Disparado pelo evento `create` (criação de branch). Se a branch
+#  seguir o padrão `{numero}-{slug}` (gerado pelo GitHub ao criar de
+#  issue), busca o tipo da issue e renomeia para `{tipo}/{numero}`:
+#
+#    Feature → feature/{N}
+#    Bug     → bugfix/{N}
+#    Task    → task/{N}
+#
+#  Se a branch não seguir o padrão ou o tipo não for mapeado, encerra
+#  sem ação. Sem risco de loop: após renomear para `feature/1`, a nova
+#  branch não começa com dígito e o padrão não bate novamente.
+#
+#  Auth: PROJECT_PAT (PAT classico, escopo repo).
+# =====================================================================
+name: Branch Naming - Reusable
+
+on:
+  workflow_call:
+    secrets:
+      PROJECT_PAT:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  rename-branch:
+    name: Renomear branch pelo tipo da issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detectar e renomear
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          BRANCH:   ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          OWNER:    ${{ github.repository_owner }}
+          REPO:     ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, subprocess, json, sys, re
+
+          if os.environ['REF_TYPE'] != 'branch':
+              sys.exit(0)
+
+          branch = os.environ['BRANCH']
+          owner  = os.environ['OWNER']
+          repo   = os.environ['REPO']
+
+          m = re.match(r'^(\d+)-', branch)
+          if not m:
+              print(f'::notice::Branch "{branch}" nao segue padrao de issue — nenhuma acao.')
+              sys.exit(0)
+
+          issue_number = int(m.group(1))
+
+          def gql(query, variables=None):
+              payload = json.dumps({'query': query, 'variables': variables or {}})
+              r = subprocess.run(
+                  ['gh', 'api', 'graphql', '--input', '-'],
+                  input=payload.encode(), capture_output=True
+              )
+              data = json.loads(r.stdout)
+              if 'errors' in data:
+                  print(f'::error::GraphQL: {data["errors"]}', file=sys.stderr)
+                  sys.exit(1)
+              return data['data']
+
+          issue_data = gql('''
+            query($owner: String!, $repo: String!, $num: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $num) {
+                  issueType { name }
+                }
+              }
+            }
+          ''', {'owner': owner, 'repo': repo, 'num': issue_number})
+
+          issue = issue_data['repository']['issue']
+          if not issue:
+              print(f'::warning::Issue #{issue_number} nao encontrada.')
+              sys.exit(0)
+
+          issue_type = (issue.get('issueType') or {}).get('name', '').lower()
+
+          TYPE_MAP = {
+              'feature': 'feature',
+              'bug':     'bugfix',
+              'task':    'task',
+          }
+
+          prefix = TYPE_MAP.get(issue_type)
+          if not prefix:
+              print(f'::notice::Tipo "{issue_type}" sem mapeamento — nenhuma acao.')
+              sys.exit(0)
+
+          new_branch = f'{prefix}/{issue_number}'
+
+          if new_branch == branch:
+              print(f'::notice::Branch ja esta no formato correto.')
+              sys.exit(0)
+
+          r = subprocess.run(
+              ['gh', 'api', '--method', 'POST',
+               f'/repos/{owner}/{repo}/branches/{branch}/rename',
+               '--field', f'new_name={new_branch}'],
+              capture_output=True
+          )
+          if r.returncode != 0:
+              print(f'::error::Falha ao renomear: {r.stderr.decode()}', file=sys.stderr)
+              sys.exit(1)
+
+          print(f'::notice::Branch renomeada: "{branch}" -> "{new_branch}"')
+          PY
