@@ -15,6 +15,18 @@
 #    3. Commit do bump [skip ci]
 #    4. Build e push da imagem Docker -> ECR
 #    5. Deploy SSH -> EC2
+#
+#  Formato de versao gerado:
+#    homologacao  ->  {versao}-B{run}-{tipo}{issue}
+#                     Ex: 1.52.0-B34-F1   (Build 34, Feature issue 1)
+#                         1.52.0-B2-B55   (Build 2, Bug issue 55)
+#                         1.52.0-B199-T88 (Build 199, Task issue 88)
+#                     B = numero sequencial do workflow run (github.run_number)
+#                     F = Feature  (branch feature/{N})
+#                     B = Bug      (branch bug/{N})
+#                     T = Task     (branch task/{N})
+#                     Fallback (branch sem padrao): {versao}-B{run}
+#    producao     ->  bump do minor: 1.52.0 -> 1.53.0
 # =====================================================================
 
 name: CD - Reusable (Build + ECR + Deploy)
@@ -253,17 +265,34 @@ jobs:
           VERSION_FILE: ${{ matrix.version_file }}
           TEC:          ${{ matrix.tecnologia }}
           ENV_TARGET:   ${{ inputs.target_env }}
+          RUN_NUMBER:   ${{ github.run_number }}
+          HEAD_REF:     ${{ needs.setup.outputs.ref }}
         run: |
           set -euo pipefail
-          STAMP=$(TZ=America/Sao_Paulo date +'%d%m%y%H%M%S')
           case "$TEC" in
             spring-boot-java|java) CUR=$(python3 -c "import re,os; s=open(os.environ['VERSION_FILE']).read(); s=re.sub(r'<parent>.*?</parent>','',s,flags=re.DOTALL); m=re.search(r'<version>([^<]+)</version>',s); print(m.group(1) if m else '')") ;;
             python)                CUR=$(grep -m1 -oP '(?<=^version *= *")[^"]+' "$VERSION_FILE") ;;
             *)                     CUR=$(node -p "require('./'+process.env.VERSION_FILE).version") ;;
           esac
-          BASE=$(echo "$CUR" | sed -E 's/-SNAPSHOT[._][0-9]+$//')
+          # Strips both old (-SNAPSHOT.TIMESTAMP) and new (-B{N}-{L}{N}) pre-release suffixes
+          BASE=$(echo "$CUR" | sed -E 's/(-SNAPSHOT[._][0-9]+|-B[0-9]+(-[FBT][0-9]+)?)$//')
           if [ "$ENV_TARGET" = "homologacao" ]; then
-            NEW="${BASE}-SNAPSHOT.${STAMP}"
+            # Formato: {versao}-B{run_number}-{tipo}{issue}
+            #   B = Build (numero sequencial do workflow run)
+            #   F = Feature  (branch feature/{N})
+            #   B = Bug      (branch bug/{N})
+            #   T = Task     (branch task/{N})
+            TYPE_LETTER=""
+            ISSUE_NUM=""
+            if   [[ "$HEAD_REF" =~ ^feature/([0-9]+)$ ]]; then TYPE_LETTER="F"; ISSUE_NUM="${BASH_REMATCH[1]}"
+            elif [[ "$HEAD_REF" =~ ^bug/([0-9]+)$ ]];     then TYPE_LETTER="B"; ISSUE_NUM="${BASH_REMATCH[1]}"
+            elif [[ "$HEAD_REF" =~ ^task/([0-9]+)$ ]];    then TYPE_LETTER="T"; ISSUE_NUM="${BASH_REMATCH[1]}"
+            fi
+            if [ -n "$TYPE_LETTER" ]; then
+              NEW="${BASE}-B${RUN_NUMBER}-${TYPE_LETTER}${ISSUE_NUM}"
+            else
+              NEW="${BASE}-B${RUN_NUMBER}"
+            fi
           else
             IFS='.' read -r A B C <<<"$BASE"
             NEW="${A}.$((B+1)).0"
