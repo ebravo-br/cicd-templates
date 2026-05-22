@@ -373,11 +373,15 @@ jobs:
 
           # Aplicar nova versao
           if tec in ('spring-boot-java', 'java'):
-              updated = re.sub(
-                  r'(<project[^>]*>.*?<version>)[^<]+(</version>)',
-                  lambda m: m.group(1) + new + m.group(2),
-                  content, count=1, flags=re.DOTALL
-              )
+              parent = re.search(r'<parent>.*?</parent>', content, re.DOTALL)
+              if parent:
+                  after = content[parent.end():]
+                  after = re.sub(r'(<version>)([^<]+)(</version>)',
+                                 lambda m: m.group(1)+new+m.group(3), after, count=1)
+                  updated = content[:parent.end()] + after
+              else:
+                  updated = re.sub(r'(<version>)([^<]+)(</version>)',
+                                   lambda m: m.group(1)+new+m.group(3), content, count=1)
           elif tec == 'python':
               updated = re.sub(r'^version *= *"[^"]*"', f'version = "{new}"', content, flags=re.MULTILINE)
           else:
