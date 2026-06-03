@@ -270,7 +270,28 @@ jobs:
         run: |
           set -euo pipefail
           case "$TEC" in
-            spring-boot-java|java) CUR=$(python3 -c "import re,os; s=open(os.environ['VERSION_FILE']).read(); s=re.sub(r'<parent>.*?</parent>','',s,flags=re.DOTALL); m=re.search(r'<version>([^<]+)</version>',s); print(m.group(1) if m else '')") ;;
+            spring-boot-java|java)
+              CUR=$(python3 - <<'PY'
+          import os, re
+          # Versao do PROJETO = <version> do cabecalho (antes de properties/dependencies/build),
+          # ignorando o bloco <parent>. Robusto a qualquer ordem dos elementos no pom.
+          src = open(os.environ['VERSION_FILE']).read()
+          m_sec = re.search(r'<(?:properties|dependencies|dependencyManagement|build|profiles)[\s>]', src)
+          header_end = m_sec.start() if m_sec else len(src)
+          parent = re.search(r'<parent\b.*?</parent>', src, re.DOTALL)
+          pspan = (parent.start(), parent.end()) if parent else None
+          ver = ''
+          for vm in re.finditer(r'<version>([^<]+)</version>', src):
+              if vm.start() >= header_end:
+                  break
+              if pspan and pspan[0] <= vm.start() < pspan[1]:
+                  continue
+              ver = vm.group(1).strip()
+              break
+          print(ver)
+          PY
+          )
+              ;;
             python)                CUR=$(grep -m1 -oP '(?<=^version *= *")[^"]+' "$VERSION_FILE") ;;
             *)                     CUR=$(node -p "require('./'+process.env.VERSION_FILE).version") ;;
           esac
@@ -311,19 +332,27 @@ jobs:
           case "$TEC" in
             spring-boot-java|java)
               python3 - <<'PY'
-          import os, re
+          import os, re, sys
           fp = os.environ['VERSION_FILE']; new = os.environ['NEW']
           src = open(fp).read()
-          parent = re.search(r'<parent>.*?</parent>', src, re.DOTALL)
-          if parent:
-              after = src[parent.end():]
-              after = re.sub(r'(<version>)([^<]+)(</version>)',
-                             lambda m: m.group(1)+new+m.group(3), after, count=1)
-              src = src[:parent.end()] + after
+          # Troca apenas o <version> do PROJETO (cabecalho, fora de <parent> e de dependencias)
+          m_sec = re.search(r'<(?:properties|dependencies|dependencyManagement|build|profiles)[\s>]', src)
+          header_end = m_sec.start() if m_sec else len(src)
+          parent = re.search(r'<parent\b.*?</parent>', src, re.DOTALL)
+          pspan = (parent.start(), parent.end()) if parent else None
+          target = None
+          for vm in re.finditer(r'(<version>)([^<]+)(</version>)', src):
+              if vm.start() >= header_end:
+                  break
+              if pspan and pspan[0] <= vm.start() < pspan[1]:
+                  continue
+              target = vm
+              break
+          if target is None:
+              print('::warning::Nao encontrei <version> do projeto no pom.xml; arquivo nao alterado.', file=sys.stderr)
           else:
-              src = re.sub(r'(<version>)([^<]+)(</version>)',
-                           lambda m: m.group(1)+new+m.group(3), src, count=1)
-          open(fp,'w').write(src)
+              src = src[:target.start()] + target.group(1) + new + target.group(3) + src[target.end():]
+              open(fp,'w').write(src)
           PY
               ;;
             python)
@@ -402,15 +431,23 @@ jobs:
 
           # Aplicar nova versao
           if tec in ('spring-boot-java', 'java'):
-              parent = re.search(r'<parent>.*?</parent>', content, re.DOTALL)
-              if parent:
-                  after = content[parent.end():]
-                  after = re.sub(r'(<version>)([^<]+)(</version>)',
-                                 lambda m: m.group(1)+new+m.group(3), after, count=1)
-                  updated = content[:parent.end()] + after
-              else:
-                  updated = re.sub(r'(<version>)([^<]+)(</version>)',
-                                   lambda m: m.group(1)+new+m.group(3), content, count=1)
+              # Troca apenas o <version> do PROJETO (cabecalho, fora de <parent> e de dependencias)
+              m_sec = re.search(r'<(?:properties|dependencies|dependencyManagement|build|profiles)[\s>]', content)
+              header_end = m_sec.start() if m_sec else len(content)
+              parent = re.search(r'<parent\b.*?</parent>', content, re.DOTALL)
+              pspan = (parent.start(), parent.end()) if parent else None
+              target = None
+              for vm in re.finditer(r'(<version>)([^<]+)(</version>)', content):
+                  if vm.start() >= header_end:
+                      break
+                  if pspan and pspan[0] <= vm.start() < pspan[1]:
+                      continue
+                  target = vm
+                  break
+              if target is None:
+                  print('::error::Nao encontrei <version> do projeto no pom.xml.', file=sys.stderr)
+                  sys.exit(1)
+              updated = content[:target.start()] + target.group(1) + new + target.group(3) + content[target.end():]
           elif tec == 'python':
               updated = re.sub(r'^version *= *"[^"]*"', f'version = "{new}"', content, flags=re.MULTILINE)
           else:
