@@ -503,7 +503,13 @@ jobs:
           docker build -f "$DOCKERFILE" --build-arg ENV_TARGET="$ENV_TARGET" -t "$IMG" "$CONTEXT"
           docker push "$IMG"
           if [ "$ENV_TARGET" = "producao" ]; then
-            docker tag  "$IMG" "$REGISTRY/$REPO:latest"
+            docker tag "$IMG" "$REGISTRY/$REPO:latest"
+            # Repos ECR com tag imutavel nao permitem sobrescrever 'latest'.
+            # Removemos a tag antiga (se existir) e re-empurramos para a nova imagem:
+            # em repo mutavel e inofensivo; em imutavel, destrava o push.
+            # A imagem antiga permanece (ainda referenciada pela sua tag de versao).
+            aws ecr batch-delete-image --repository-name "$REPO" \
+              --image-ids imageTag=latest >/dev/null 2>&1 || true
             docker push "$REGISTRY/$REPO:latest"
           fi
           echo "IMAGE_URI=$IMG" >> "$GITHUB_ENV"
