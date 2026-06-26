@@ -61,3 +61,13 @@ Bump do minor: `1.52.0` → `1.53.0`
 - `PROJECT_PAT` — PAT clássico do usuário `juniorebravo` (scopo: `project`, `repo`, `read:org`). Necessário para automações cross-org (ebravo-br ↔ tramar-br). Configurado como org secret em ambas as orgs.
 - `GH_TOKEN_BUMP` — mesmo PAT, usado pelo deploy para commitar o bump de versão diretamente na branch protegida (tem `bypass_pull_request_allowances` em todos os repos).
 - `enforce_admins: true` está ativo em todos os repos. Para push direto na main do cicd-templates, desabilitar temporariamente via `gh api -X DELETE /repos/ebravo-br/cicd-templates/branches/main/protection/enforce_admins`.
+
+## Organization roles
+
+Para conceder **admin de todos os repositórios sem poderes de Owner** (billing, membros, settings da org), usa-se a organization role predefinida `all_repo_admin` (id `8136` em ambas as orgs), atribuída ao team `techleads`. O usuário continua `Member` da org — não promover a Owner.
+
+- Atribuir: `gh api -X PUT /orgs/{org}/organization-roles/teams/techleads/8136` (resposta `204`).
+- Verificar: `gh api /orgs/{org}/organization-roles/8136/teams --jq '.[].slug'` (deve listar `techleads`).
+- Remover: `gh api -X DELETE /orgs/{org}/organization-roles/teams/techleads/8136`.
+
+Aplicado em `ebravo-br` e `tramar-br`. Como a role está no team, qualquer membro adicionado ao `techleads` herda o acesso automaticamente.
