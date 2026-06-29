@@ -1,13 +1,14 @@
+---
+name: create-repository
+description: Cria um novo repositório GitHub na org ebravo-br do zero seguindo todos os padrões da org — branch protection, permissões de time, workflows CI/CD (ci/deploy/rollback/project-automation/issue-epic), estrutura infra/, pipeline.yml e vínculo ao épico correto no project "Ebravo Projetos". Use quando pedirem para "criar um repositório", "criar repo novo", "novo serviço na ebravo-br", ou via /create-repository <repo> <epic> [tecnologia] [componente].
+---
+
 # Create Repository (ebravo-br)
 
 Cria um novo repositório GitHub na org `ebravo-br` do zero seguindo todos os
 padrões da org: branch protection, permissões de time, workflows CI/CD,
 estrutura `infra/`, `pipeline.yml` e vínculo ao épico correto no projeto
 "Ebravo Projetos".
-
-> **Fonte canônica:** `skill/create-repository.md`
-> A cópia em `.claude/commands/create-repository.md` é idêntica e existe para
-> que o slash command `/create-repository` seja reconhecido pelo Claude Code.
 
 ## Input: $ARGUMENTS
 
