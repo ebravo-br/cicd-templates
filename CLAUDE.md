@@ -71,3 +71,7 @@ Para conceder **admin de todos os repositórios sem poderes de Owner** (billing,
 - Remover: `gh api -X DELETE /orgs/{org}/organization-roles/teams/techleads/8136`.
 
 Aplicado em `ebravo-br` e `tramar-br`. Como a role está no team, qualquer membro adicionado ao `techleads` herda o acesso automaticamente.
+
+**Member vs maintainer do team:** o `all_repo_admin` dá admin nos repositórios individualmente, mas para gerenciar a aba *Repositories* do próprio team (dropdown de Role + botão "Add repository") o usuário precisa ser **maintainer** do `techleads`, não só `member`. Adicionar/promover: `gh api -X PUT /orgs/{org}/teams/techleads/memberships/{user} -f role=maintainer`.
+
+Para conceder o pacote completo de tech lead a um novo usuário (membership + maintainer no techleads nas duas orgs), use a skill **`add-techlead`** (`.claude/skills/add-techlead/`).
