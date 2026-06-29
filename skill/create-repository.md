@@ -40,6 +40,7 @@ Parâmetros:
 | `TOTEM` | `totem-*` |
 | `ACG` | `acg-*` |
 | `SENSIVE` | `sensive-*` |
+| `EBRAG` | `rag-*` |
 
 Se o épico informado não estiver nessa lista, **pare** e informe o usuário que é necessário:
 1. Adicionar a opção ao campo "Épico" no GitHub Project #2 (`ebravo-br / Ebravo Projetos`)
@@ -75,6 +76,7 @@ Se `epic` não foi informado ou está vazio, **pare** e exiba:
   TOTEM      → repos totem-*
   ACG        → repos acg-*
   SENSIVE    → repos sensive-*
+  EBRAG      → repos rag-*
 
 Se o épico do projeto ainda não existe nessa lista, informe o nome desejado
 e explique que precisará ser criado manualmente antes de continuar.
@@ -95,7 +97,7 @@ Para criar um novo épico é necessário:
 
 Após criar o épico no projeto e mesclar o PR, execute este comando novamente.
 
-Épicos válidos agora: TRAMAR, EBDOCS, EBCARE, CEMITERIO, ERS, ATOS, DATAPAT, TOTEM, ACG, SENSIVE
+Épicos válidos agora: TRAMAR, EBDOCS, EBCARE, CEMITERIO, ERS, ATOS, DATAPAT, TOTEM, ACG, SENSIVE, EBRAG
 ```
 
 Não avançar para o Passo 1 sem épico válido confirmado.
@@ -549,6 +551,7 @@ datapat*                 → DATAPAT
 totem*                   → TOTEM
 acg*                     → ACG
 sensive*                 → SENSIVE
+rag*                     → EBRAG
 (sem match)              → (nenhum)
 ```
 
