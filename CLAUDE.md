@@ -101,6 +101,7 @@ Para consolidar um par `*-api` + `*-web` num monorepo (histórico preservado, es
 | `tramar-br/tramar-tps` | `tramar-tps-api` + `tramar-tps-web` | Spring Boot + Angular |
 | `tramar-br/tramar-pedidos` | `tramar-pedidos-api` + `tramar-pedidos-web` | Spring Boot + Angular |
 | `ebravo-br/ers` | `ers-api` + `ers-web` | Spring Boot + Angular |
+| `ebravo-br/cemiterio-campo-limpo` | `cemiterio-campo-limpo-api` + `cemiterio-campo-limpo-web` | Spring Boot + Angular |
 | `ebravo-br/ebcare` | (nasceu monorepo) | NestJS + Next.js |
 
 Os repos de origem `tramar-*-api`/`tramar-*-web` foram arquivados após a migração (histórico preservado dentro do monorepo em `apps/api` e `apps/web`).
