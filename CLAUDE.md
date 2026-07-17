@@ -56,6 +56,44 @@ Fallback (branch sem padrão): `{versao}-B{run_number}`
 
 Bump do minor: `1.52.0` → `1.53.0`
 
+### Tag/Release de produção
+
+| Tipo | Formato da tag | Exemplo |
+|---|---|---|
+| Single-repo | `{versao}` | `1.53.0` |
+| Monorepo | `{app}/{versao}` | `api/1.97.0`, `web/1.92.0` |
+
+O prefixo (`api`/`web`) sai de `matrix.app`. A imagem no ECR usa sempre `{componente}:{versao}` (sem prefixo). Homologação não cria tag/release.
+
+## Monorepo
+
+Os reusable `ci.yml` / `cd.yml` / `rollback.yml` são **monorepo-aware**. Com `monorepo: true` no `.github/pipeline.yml`, o job `setup` itera as chaves `api`/`web` e resolve por app: `context: apps/<app>`, `version_file: apps/<app>/{pom.xml|package.json|pyproject.toml}` e `dockerfile: infra/docker/<app>/Dockerfile`. `cd.yml`/`rollback.yml` aceitam `deploy_apps: ambos | api | web`. Em produção, a tag/release de cada app é prefixada: `{app}/{versao}` (ex.: `api/1.97.0`, `web/1.92.0`).
+
+Layout esperado (modelo `ebravo-br/ebcare`):
+
+```
+apps/api/            # código do backend (versão no pom.xml/package.json)
+apps/web/            # código do frontend
+infra/docker/api/Dockerfile
+infra/docker/web/Dockerfile
+.github/pipeline.yml # monorepo: true + blocos api/web (componente = nome da imagem ECR)
+```
+
+`.github/pipeline.yml` de monorepo:
+
+```yaml
+monorepo: true
+api:
+  componente: <repo>-api
+  tecnologia: spring-boot-java
+web:
+  componente: <repo>-web
+  tecnologia: angular
+  node: '20'
+```
+
+Para consolidar um par `*-api` + `*-web` num monorepo (histórico preservado, esteira monorepo, herança de permissões, arquivamento das origens), use a skill **`migrate-to-monorepo`** (`.claude/skills/migrate-to-monorepo/`). Exemplo aplicado: `tramar-br/tramar-tps` (consolidou `tramar-tps-api` Spring Boot + `tramar-tps-web` Angular).
+
 ## Auth / secrets
 
 - `PROJECT_PAT` — PAT clássico do usuário `juniorebravo` (scopo: `project`, `repo`, `read:org`). Necessário para automações cross-org (ebravo-br ↔ tramar-br). Configurado como org secret em ambas as orgs.

@@ -27,6 +27,11 @@
 #                     T = Task     (branch task/{N})
 #                     Fallback (branch sem padrao): {versao}-B{run}
 #    producao     ->  bump do minor: 1.52.0 -> 1.53.0
+#
+#  Tag/Release (apenas producao):
+#    single-repo  ->  {versao}          (ex: 1.53.0)
+#    monorepo     ->  {app}/{versao}    (ex: api/1.97.0, web/1.92.0)
+#    A imagem no ECR usa sempre {componente}:{versao} (sem prefixo).
 # =====================================================================
 
 name: CD - Reusable (Build + ECR + Deploy)
@@ -172,6 +177,7 @@ jobs:
                       'python': g(sub,'python') or dp,
                       'context': f'apps/{app}', 'dockerfile': df,
                       'version_file': version_file(tec, f'apps/{app}'),
+                      'monorepo': 'true',
                   })
           else:
               comp = g(cfg, 'componente')
@@ -193,6 +199,7 @@ jobs:
                   'python': g(cfg,'python') or dp,
                   'context': '.', 'dockerfile': df,
                   'version_file': version_file(tec, '.'),
+                  'monorepo': 'false',
               })
 
           if not items:
@@ -520,11 +527,16 @@ jobs:
         env:
           NEW:           ${{ steps.ver.outputs.new }}
           COMP:          ${{ matrix.componente }}
+          APP:           ${{ matrix.app }}
+          MONO:          ${{ matrix.monorepo }}
           GH_TOKEN_BUMP: ${{ secrets.GH_TOKEN_BUMP }}
         run: |
           export GH_TOKEN="${GH_TOKEN_BUMP:-$GITHUB_TOKEN}"
-          gh release create "$NEW" \
-            --title "Release $NEW" \
+          # Monorepo: prefixa a tag com a camada (ex.: api/1.97.0, web/1.92.0).
+          # Single-repo: tag = numero puro (retrocompativel).
+          if [ "$MONO" = "true" ]; then TAG="${APP}/${NEW}"; else TAG="$NEW"; fi
+          gh release create "$TAG" \
+            --title "Release $TAG" \
             --notes "Deploy de produção — \`$COMP:$NEW\`" \
             --latest
 
