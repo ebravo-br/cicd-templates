@@ -177,7 +177,6 @@ A publicação em produção é **restrita a uma lista controlada de pessoas**. 
 | Usuário |
 |---|
 | `juniorebravo` |
-| `mario-pedrao` |
 
 > Qualquer tentativa de publicar em produção por alguém fora dessa lista é **automaticamente bloqueada** pelo sistema.
 
@@ -189,7 +188,6 @@ A publicação em produção é **restrita a uma lista controlada de pessoas**. 
 | `murilo-tramar` | Administrador |
 | `carloscarvalho-debug` | Membro |
 | `gustavo-souza-ebravo` | Membro |
-| `mario-pedrao` | Membro |
 | `MatheusIsidio` | Membro |
 | `sophiaenzo` | Membro |
 
