@@ -3,7 +3,7 @@
 > Documento de apresentação da estrutura técnica da organização **`tramar-br`** no GitHub.
 > Objetivo: dar ao gestor uma visão clara de **como o desenvolvimento, a publicação (deploy) e o controle de qualidade** estão organizados — sem necessidade de conhecimento técnico aprofundado.
 >
-> _Última atualização: junho de 2026._
+> _Última atualização: julho de 2026._
 
 ---
 
@@ -27,18 +27,16 @@ Essa esteira mora num repositório central chamado **`cicd-templates`** (mantido
 
 ## 2. Sistemas (repositórios)
 
-A organização possui **11 repositórios**, todos **privados**. Eles se dividem em dois grupos:
+A organização possui **9 repositórios ativos**, todos **privados** (mais 4 arquivados — ver 2.3). Eles se dividem em dois grupos:
 
-### 2.1 Sistemas com esteira de deploy configurada
+### 2.1 Sistemas com esteira de deploy configurada — **monorepos**
 
-Estes têm a esteira completa: testes, versionamento e geração da imagem da aplicação. A **forma de publicação difere por sistema** (ver seção 4):
+Cada módulo (Pedidos e TPS) foi consolidado num **único repositório (monorepo)** que reúne o backend (`api`) e o frontend (`web`) lado a lado (pastas `apps/api` e `apps/web`), compartilhando a mesma esteira. Cada camada é construída, versionada e publicada de forma independente (é possível deployar só a `api`, só o `web`, ou ambos). A **forma de publicação difere por módulo** (ver seção 4):
 
-| Sistema | Função | Tecnologia | Publicação |
-|---|---|---|---|
-| `tramar-pedidos-api` | Backend do módulo de Pedidos | Java (Spring Boot) | **Automática** — servidores EC2 da Ebravo (AWS) |
-| `tramar-pedidos-web` | Frontend do módulo de Pedidos | Angular | **Automática** — servidores EC2 da Ebravo (AWS) |
-| `tramar-tps-api` | Backend do módulo TPS | Java (Spring Boot) | **Manual** — servidores on-premises da Tramar |
-| `tramar-tps-web` | Frontend do módulo TPS | Angular | **Manual** — servidores on-premises da Tramar |
+| Sistema (monorepo) | Módulo | Camadas | Tecnologia | Publicação |
+|---|---|---|---|---|
+| `tramar-pedidos` | Pedidos | `api` + `web` | Java (Spring Boot) + Angular | **Automática** — servidores EC2 da Ebravo (AWS) |
+| `tramar-tps` | TPS | `api` + `web` | Java (Spring Boot) + Angular | **Manual** — servidores on-premises da Tramar |
 
 ### 2.2 Repositórios com automação parcial
 
@@ -53,6 +51,17 @@ Têm o controle de qualidade (CI) e a padronização de branches ativos, mas **a
 | `chao-de-fabrica` | — |
 | `move-track` | — |
 | `sdc-javaswing` | Sistema legado (Java Swing, desktop); usa branch `master` |
+
+### 2.3 Repositórios arquivados (consolidados em monorepos)
+
+Os quatro repositórios abaixo foram **migrados para monorepos** (seção 2.1) e ficaram **arquivados** (somente leitura). Todo o histórico de código foi preservado dentro do monorepo correspondente, em `apps/api` / `apps/web`.
+
+| Repositório arquivado | Consolidado em |
+|---|---|
+| `tramar-pedidos-api` | `tramar-pedidos` (`apps/api`) |
+| `tramar-pedidos-web` | `tramar-pedidos` (`apps/web`) |
+| `tramar-tps-api` | `tramar-tps` (`apps/api`) |
+| `tramar-tps-web` | `tramar-tps` (`apps/web`) |
 
 ---
 
@@ -83,9 +92,9 @@ Após a **abertura do Pull Request**, é **obrigatório um code review** antes d
 
 ## 4. Procedimento de Deploy
 
-> Aplica-se **apenas aos 4 projetos com esteira configurada**: `tramar-tps-web`, `tramar-tps-api`, `tramar-pedidos-web` e `tramar-pedidos-api`.
+> Aplica-se **aos 2 monorepos com esteira configurada**: `tramar-pedidos` e `tramar-tps` (cada um com as camadas `api` e `web`).
 
-O deploy é **sempre acionado manualmente** por um desenvolvedor, pela aba **Actions** do GitHub. Ao ser acionado, a esteira **gera uma imagem versionada** da aplicação e a publica no repositório de imagens da AWS (**ECR**). O que acontece depois depende do sistema (ver 4.3).
+O deploy é **sempre acionado manualmente** por um desenvolvedor, pela aba **Actions** do GitHub. Ao acionar, escolhe-se **qual camada publicar** — `api`, `web` ou `ambos` (parâmetro `deploy_apps`). A esteira **gera uma imagem versionada** de cada camada e a publica no repositório de imagens da AWS (**ECR**), em repositórios separados por camada (`tramar-pedidos-api`, `tramar-pedidos-web`, etc.). O que acontece depois depende do módulo (ver 4.3).
 
 ### 4.1 Deploy em Homologação — após push em branch `feature`/`bug`/`task`
 
@@ -105,10 +114,10 @@ O deploy é **sempre acionado manualmente** por um desenvolvedor, pela aba **Act
 
 ### 4.3 Conclusão do deploy — específico por projeto
 
-**`tramar-pedidos-web` / `tramar-pedidos-api` — Automático**
+**`tramar-pedidos` (camadas `api` / `web`) — Automático**
 O deploy é **concluído automaticamente** nos **servidores EC2 da Ebravo (AWS)**. Além de acionar o workflow (4.1 / 4.2), **nada é manual**.
 
-**`tramar-tps-web` / `tramar-tps-api` — Manual (on-premises)**
+**`tramar-tps` (camadas `api` / `web`) — Manual (on-premises)**
 A esteira **apenas gera a imagem versionada no ECR**. O deploy nos **servidores locais da Tramar** (datacenter próprio) é feito **manualmente** por um desenvolvedor:
 
 1. **Conectar no servidor** via SSH:
@@ -124,9 +133,9 @@ A esteira **apenas gera a imagem versionada no ECR**. O deploy nos **servidores 
 
 ### Infraestrutura
 
-- **ECR (AWS, região São Paulo `sa-east-1`)** — repositório central de **imagens versionadas**, usado pelos 4 sistemas com esteira.
-- **`tramar-pedidos-*`** — rodam nos **servidores EC2 da Ebravo (AWS)**, com deploy automático.
-- **`tramar-tps-*`** — rodam no **datacenter próprio da Tramar (on-premises)**: servidores locais `homologtps` (homologação) e `persefone` (produção), com deploy manual.
+- **ECR (AWS, região São Paulo `sa-east-1`)** — repositório central de **imagens versionadas**, com um repositório por camada (`tramar-pedidos-api`, `tramar-pedidos-web`, `tramar-tps-api`, `tramar-tps-web`).
+- **`tramar-pedidos`** — roda nos **servidores EC2 da Ebravo (AWS)**, com deploy automático.
+- **`tramar-tps`** — roda no **datacenter próprio da Tramar (on-premises)**: servidores locais `homologtps` (homologação) e `persefone` (produção), com deploy manual.
 - **Não há ECS/Kubernetes na AWS** — o ambiente da Tramar é **todo on-premises**.
 
 ### Versionamento automático
@@ -136,7 +145,7 @@ A cada deploy, a versão do sistema é incrementada automaticamente:
 - **Homologação** — gera uma versão de teste rastreável, identificando o número da entrega e a tarefa de origem.
   Exemplo: `1.52.0-B34-F1` (entrega nº 34, referente à funcionalidade da tarefa nº 1).
 - **Produção** — gera uma versão "oficial" limpa e cria um **registro de release** no GitHub.
-  Exemplo: `1.52.0` → `1.53.0`.
+  Exemplo: `1.52.0` → `1.53.0`. Nos monorepos, a tag/release é **prefixada pela camada** para distinguir api e web na aba *Tags* — ex.: `api/1.39.0`, `web/1.30.0`.
 
 Isso garante que sempre se saiba **exatamente qual versão está em cada ambiente** e **de onde ela veio** — inclusive a versão usada no deploy manual on-premises (`VERSAO_IMAGEM`).
 
@@ -144,8 +153,8 @@ Isso garante que sempre se saiba **exatamente qual versão está em cada ambient
 
 ## 6. Rollback (voltar para uma versão anterior)
 
-- **`tramar-pedidos-web` / `tramar-pedidos-api`** — rollback **habilitado pela esteira**: é possível voltar para uma imagem anterior do ECR de forma automatizada.
-- **Demais sistemas** (`tramar-tps-*` e os que rodam on-premises) — o rollback é feito **manualmente, na rede interna**, pela equipe.
+- **`tramar-pedidos` (camadas `api` / `web`)** — rollback **habilitado pela esteira**: é possível voltar para uma imagem anterior do ECR de forma automatizada (por camada).
+- **Demais sistemas** (`tramar-tps` e os que rodam on-premises) — o rollback é feito **manualmente, na rede interna**, pela equipe.
 
 ---
 
@@ -226,6 +235,7 @@ Os repositórios instalam apenas "atalhos" leves que apontam para a esteira cent
 - **Centralização**: toda a lógica de automação vive em **um único lugar** (`cicd-templates`). Atualizações são aplicadas a todos os sistemas simultaneamente, reduzindo custo de manutenção e risco de inconsistência.
 - **Padrão único entre Ebravo e Tramar**: as duas organizações compartilham a mesma esteira, facilitando a operação por uma equipe comum.
 - **Modelo híbrido de infraestrutura**: os sistemas de **Pedidos** rodam na nuvem (EC2 da Ebravo, deploy automático) e os de **TPS** rodam no **datacenter on-premises da Tramar** (deploy manual), atendidos pela mesma esteira de build/versionamento.
+- **Consolidação em monorepos**: cada módulo (Pedidos e TPS) passou a viver num **único repositório** com backend e frontend juntos (`apps/api` + `apps/web`), simplificando a manutenção e permitindo entregas coordenadas — com deploy e versionamento ainda **independentes por camada**. Os repositórios antigos (`*-api`/`*-web`) foram arquivados com o histórico preservado.
 
 ---
 

@@ -92,7 +92,17 @@ web:
   node: '20'
 ```
 
-Para consolidar um par `*-api` + `*-web` num monorepo (histórico preservado, esteira monorepo, herança de permissões, arquivamento das origens), use a skill **`migrate-to-monorepo`** (`.claude/skills/migrate-to-monorepo/`). Exemplo aplicado: `tramar-br/tramar-tps` (consolidou `tramar-tps-api` Spring Boot + `tramar-tps-web` Angular).
+Para consolidar um par `*-api` + `*-web` num monorepo (histórico preservado, esteira monorepo, herança de permissões, arquivamento das origens), use a skill **`migrate-to-monorepo`** (`.claude/skills/migrate-to-monorepo/`).
+
+### Monorepos migrados
+
+| Monorepo | Origens (arquivadas) | Stack |
+|---|---|---|
+| `tramar-br/tramar-tps` | `tramar-tps-api` + `tramar-tps-web` | Spring Boot + Angular |
+| `tramar-br/tramar-pedidos` | `tramar-pedidos-api` + `tramar-pedidos-web` | Spring Boot + Angular |
+| `ebravo-br/ebcare` | (nasceu monorepo) | NestJS + Next.js |
+
+Os repos de origem `tramar-*-api`/`tramar-*-web` foram arquivados após a migração (histórico preservado dentro do monorepo em `apps/api` e `apps/web`).
 
 ## Auth / secrets
 
