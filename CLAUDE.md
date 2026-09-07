@@ -4,7 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`pipeline-as-code` — repositório `ebravo-br/cicd-templates` com workflows reutilizáveis de CI/CD para as orgs `ebravo-br` e `tramar-br`. A tag `v1` é apontada manualmente após cada push (`git tag -f v1 HEAD && git push --force origin v1`).
+`pipeline-as-code` — repositório `ebravo-br/cicd-templates` com workflows reutilizáveis de CI/CD para as orgs `ebravo-br` e `tramar-br`.
+
+## Versionamento das tags — leia antes de mexer
+
+| Tag | Aponta para | Quem usa | Comportamento |
+|---|---|---|---|
+| `v1` | commit fixo `95948a0` | todos os repositórios, das duas orgs | deploy por SSH no EC2; access key estática |
+| `v2` | `main` | repositórios já migrados para ECS | deploy por ECS; OIDC quando `AWS_DEPLOY_ROLE_ARN` existe |
+
+**Não mova a `v1`.** Ela é compartilhada pela `ebravo-br` e pela `tramar-br`, e um `git tag -f v1` altera o deploy de todas as empresas no mesmo instante, sem revisão e sem aviso. O hábito antigo era exatamente esse (`git tag -f v1 HEAD && git push --force origin v1`); ele funcionava porque só havia um caminho de deploy.
+
+Mudança de comportamento entra em tag nova. Cada repositório migra trocando `@v1` por `@v2` no seu `deploy.yml` e `rollback.yml`, quando a aplicação dele for migrada para o ECS — o que também é o caminho de volta: reverter para `@v1` restaura o deploy por SSH.
+
+Contexto e plano completos em `ebravo-br/ebravo-infra` (V8 em `docs/05`, Fase 4 em `docs/03`).
 
 ## Estrutura de workflows
 

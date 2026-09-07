@@ -34,10 +34,12 @@ on:
         required: false
         default: ambos
     secrets:
-      AWS_ACCESS_KEY_ID:     { required: true }
-      AWS_SECRET_ACCESS_KEY: { required: true }
-      SSH_KEY_HOMOL:         { required: true }
-      SSH_KEY_PROD:          { required: true }
+      # Opcionais desde o v2: com OIDC nao existem access keys, e so o
+      # caminho `ec2` usa SSH. Ver V6 em ebravo-br/ebravo-infra, docs/05.
+      AWS_ACCESS_KEY_ID:     { required: false }
+      AWS_SECRET_ACCESS_KEY: { required: false }
+      SSH_KEY_HOMOL:         { required: false }
+      SSH_KEY_PROD:          { required: false }
 
 permissions:
   contents: read
@@ -142,13 +144,24 @@ jobs:
       max-parallel: 1
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Credenciais AWS via OIDC
+        if: vars.AWS_DEPLOY_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: rollback-${{ github.run_id }}
+          aws-region:        ${{ env.AWS_REGION }}
+
+      - name: Credenciais AWS via access key (legado, V6)
+        if: vars.AWS_DEPLOY_ROLE_ARN == ''
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      - uses: aws-actions/amazon-ecr-login@v2
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       # ---- Validar tag no ECR -----------------------------------------
       - name: Validar tag no ECR
@@ -157,6 +170,15 @@ jobs:
           TAG:  ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
+
+          # Guarda explicita: com TAG vazia o `--image-ids imageTag=` falha
+          # na validacao de parametro do proprio CLI, e a mensagem que
+          # chegava ao usuario era sobre sintaxe, nao sobre a tag faltando.
+          if [ -z "${TAG// /}" ]; then
+            echo "::error::A tag da imagem esta vazia. Informe a versao para a qual voltar, por exemplo 1.5.0."
+            exit 1
+          fi
+
           FOUND=$(aws ecr describe-images --repository-name "$REPO" \
             --image-ids imageTag="$TAG" \
             --query 'imageDetails[0].imageTags[0]' \
@@ -169,6 +191,7 @@ jobs:
 
       # ---- Configurar chave SSH ----------------------------------------
       - name: Configurar chave SSH
+        if: inputs.deploy_platform == 'ec2'
         env:
           KEY_HOMOL:  ${{ secrets.SSH_KEY_HOMOL }}
           KEY_PROD:   ${{ secrets.SSH_KEY_PROD }}
@@ -201,9 +224,69 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
             "$SCRIPT $COMP $TAG"
 
-      - name: Rollback ECS  (desativado)
+      # Mesma mecanica do deploy, com a imagem vinda da tag informada em vez
+      # de um build novo. Nada e reconstruido — volta-se a um artefato que
+      # ja existe no ECR, que e o que torna o rollback rapido e previsivel.
+      - name: Rollback ECS
         if: inputs.deploy_platform == 'ecs'
-        run: echo "::warning::Rollback ECS ainda nao habilitado." && exit 0
+        env:
+          ENV_TARGET:    ${{ inputs.target_env }}
+          SERVICO:       ${{ matrix.componente }}
+          TAG:           ${{ inputs.image_tag }}
+          REGISTRY:      ${{ steps.ecr.outputs.registry }}
+          CLUSTER_PROD:  ${{ vars.ECS_CLUSTER_PROD }}
+          CLUSTER_HOMOL: ${{ vars.ECS_CLUSTER_HOMOL }}
+        run: |
+          set -euo pipefail
+
+          if [ "$ENV_TARGET" = "producao" ]; then
+            CLUSTER="$CLUSTER_PROD"; SUFIXO="prod"
+          else
+            CLUSTER="$CLUSTER_HOMOL"; SUFIXO="homol"
+          fi
+          if [ -z "$CLUSTER" ]; then
+            echo "::error::Variavel ECS_CLUSTER_$(echo $SUFIXO | tr a-z A-Z) nao configurada. O rollback ECS precisa saber o cluster."
+            exit 1
+          fi
+          FAMILIA="${SERVICO}-${SUFIXO}"
+          IMAGEM="$REGISTRY/$SERVICO:$TAG"
+
+          aws ecs describe-task-definition --task-definition "$FAMILIA" \
+            --query taskDefinition > /tmp/td-atual.json
+
+          jq --arg img "$IMAGEM" --arg c "$SERVICO" '
+            .containerDefinitions = (.containerDefinitions
+              | map(if .name == $c then .image = $img else . end))
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy,
+                  .deregisteredAt)
+          ' /tmp/td-atual.json > /tmp/td-nova.json
+
+          if ! jq -e --arg img "$IMAGEM" \
+               'any(.containerDefinitions[]; .image == $img)' /tmp/td-nova.json >/dev/null; then
+            echo "::error::Nenhum container chamado '$SERVICO' na familia '$FAMILIA'."
+            exit 1
+          fi
+
+          REV=$(aws ecs register-task-definition --cli-input-json file:///tmp/td-nova.json \
+                  --query 'taskDefinition.revision' --output text)
+          echo "::notice::Registrada $FAMILIA:$REV apontando para $IMAGEM"
+
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICO" \
+            --task-definition "$FAMILIA:$REV" >/dev/null
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICO" || true
+
+          # Num rollback, um circuit breaker que reverte e especialmente
+          # grave: significa que nem a versao anterior sobe. Falhar aqui e o
+          # que faz o operador procurar o log em vez de assumir que resolveu.
+          ATUAL=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICO" \
+                    --query 'services[0].taskDefinition' --output text)
+          if [ "${ATUAL##*/}" != "$FAMILIA:$REV" ]; then
+            echo "::error::O servico voltou para ${ATUAL##*/} em vez de $FAMILIA:$REV. Nem a versao '$TAG' passou no health check. Ver /ecs/$SERVICO no CloudWatch."
+            exit 1
+          fi
+          echo "::notice::Rollback concluido: $SERVICO em $TAG ($FAMILIA:$REV)."
+          echo "- ECS: \`$CLUSTER\` / \`$SERVICO\` -> \`$FAMILIA:$REV\` (\`$TAG\`)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Rollback GKE  (desativado)
         if: inputs.deploy_platform == 'gke'
