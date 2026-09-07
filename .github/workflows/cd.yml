@@ -1,5 +1,5 @@
 # =====================================================================
-#  CD - REUSABLE WORKFLOW (Build + ECR + Deploy SSH)
+#  CD - REUSABLE WORKFLOW (Build + ECR + Deploy SSH ou ECS)
 #
 #  Este arquivo vive em:
 #      ebravo-br/cicd-templates/.github/workflows/cd.yml
@@ -54,14 +54,18 @@ on:
         required: false
         default: ambos
     secrets:
+      # Deixaram de ser obrigatorios: quando a variavel AWS_DEPLOY_ROLE_ARN
+      # existe, a autenticacao e por OIDC e nao ha access key nenhuma.
+      # Ver V6 em ebravo-br/ebravo-infra, docs/05.
       AWS_ACCESS_KEY_ID:
-        required: true
+        required: false
       AWS_SECRET_ACCESS_KEY:
-        required: true
+        required: false
+      # Idem: so o caminho `ec2` usa SSH.
       SSH_KEY_HOMOL:
-        required: true
+        required: false
       SSH_KEY_PROD:
-        required: true
+        required: false
       GH_TOKEN_BUMP:
         required: false
 
@@ -484,8 +488,26 @@ jobs:
           print(f'::notice::Bump commitado: {result["commit"]["sha"][:8]} — {vf} -> {new} ({env})')
           PY
 
-      # ---- ECR --------------------------------------------------------
-      - uses: aws-actions/configure-aws-credentials@v4
+      # ---- Credenciais AWS --------------------------------------------
+      #
+      # Dois passos mutuamente exclusivos, e nao um so com os dois modos:
+      # a configure-aws-credentials, recebendo role E access key juntas, usa
+      # a key para assumir a role, que nao e o que queremos.
+      #
+      # Basta definir a variavel AWS_DEPLOY_ROLE_ARN para o repositorio
+      # passar a usar OIDC. Sem ela, segue no caminho antigo — o que permite
+      # migrar um repositorio por vez sem tocar nos demais.
+      - name: Credenciais AWS via OIDC
+        if: vars.AWS_DEPLOY_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:  ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: cd-${{ github.run_id }}
+          aws-region:      ${{ env.AWS_REGION }}
+
+      - name: Credenciais AWS via access key (legado, V6)
+        if: vars.AWS_DEPLOY_ROLE_ARN == ''
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -542,6 +564,7 @@ jobs:
 
       # ---- Deploy SSH -------------------------------------------------
       - name: Configurar chave SSH
+        if: inputs.deploy_platform == 'ec2'
         env:
           KEY_HOMOL:  ${{ secrets.SSH_KEY_HOMOL }}
           KEY_PROD:   ${{ secrets.SSH_KEY_PROD }}
@@ -573,12 +596,84 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
             "$SCRIPT $COMP $NEW"
 
-      - name: Deploy ECS  (desativado)
+      - name: Deploy ECS
         if: inputs.deploy_platform == 'ecs'
+        env:
+          ENV_TARGET:   ${{ inputs.target_env }}
+          SERVICO:      ${{ matrix.componente }}
+          IMAGEM:       ${{ env.IMAGE_URI }}
+          CLUSTER_PROD:  ${{ vars.ECS_CLUSTER_PROD }}
+          CLUSTER_HOMOL: ${{ vars.ECS_CLUSTER_HOMOL }}
         run: |
-          echo "::warning::Deploy ECS ainda nao habilitado."
-          # aws ecs update-service --cluster <C> --service ${{ matrix.componente }} --force-new-deployment
-          exit 0
+          set -euo pipefail
+
+          if [ "$ENV_TARGET" = "producao" ]; then
+            CLUSTER="$CLUSTER_PROD"; SUFIXO="prod"
+          else
+            CLUSTER="$CLUSTER_HOMOL"; SUFIXO="homol"
+          fi
+          if [ -z "$CLUSTER" ]; then
+            echo "::error::Variavel ECS_CLUSTER_$(echo $SUFIXO | tr a-z A-Z) nao configurada. O deploy ECS precisa saber o cluster."
+            exit 1
+          fi
+          FAMILIA="${SERVICO}-${SUFIXO}"
+
+          # A familia da task definition e gerenciada pelo Terraform, que usa
+          # `ignore_changes = [task_definition]` justamente para a esteira
+          # poder registrar revisoes sem conflito. Partimos da revisao ativa
+          # e trocamos so a imagem.
+          echo "::group::Registrando nova revisao de $FAMILIA"
+          aws ecs describe-task-definition --task-definition "$FAMILIA" \
+            --query taskDefinition > /tmp/td-atual.json
+
+          # A troca e apenas no container homonimo ao componente: uma task
+          # pode ter init container ou sidecar, que nao devem ser tocados.
+          jq --arg img "$IMAGEM" --arg c "$SERVICO" '
+            .containerDefinitions = (.containerDefinitions
+              | map(if .name == $c then .image = $img else . end))
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy,
+                  .deregisteredAt)
+          ' /tmp/td-atual.json > /tmp/td-nova.json
+
+          if ! jq -e --arg img "$IMAGEM" \
+               'any(.containerDefinitions[]; .image == $img)' /tmp/td-nova.json >/dev/null; then
+            echo "::error::Nenhum container chamado '$SERVICO' na familia '$FAMILIA'. O nome do componente em .github/pipeline.yml precisa ser igual ao nome do container."
+            exit 1
+          fi
+
+          REV=$(aws ecs register-task-definition --cli-input-json file:///tmp/td-nova.json \
+                  --query 'taskDefinition.revision' --output text)
+          echo "::notice::Registrada $FAMILIA:$REV com $IMAGEM"
+          echo "::endgroup::"
+
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICO" \
+            --task-definition "$FAMILIA:$REV" >/dev/null
+          echo "::notice::update-service disparado. Aguardando estabilizar..."
+
+          # `|| true`: o wait falha por timeout de 10 min, mas tambem falha
+          # quando o circuit breaker reverteu — a distincao vem da conferencia
+          # abaixo, que e mais precisa.
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICO" || true
+
+          # ESTE e o passo que impede um deploy verde mentiroso. O deployment
+          # circuit breaker reverte sozinho quando a task nao passa no health
+          # check; sem conferir a revisao, o workflow terminaria com sucesso
+          # depois de um rollback. Aconteceu com grafana-prod:5.
+          ATUAL=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICO" \
+                    --query 'services[0].taskDefinition' --output text)
+          if [ "${ATUAL##*/}" != "$FAMILIA:$REV" ]; then
+            echo "::error::O servico voltou para ${ATUAL##*/} em vez de $FAMILIA:$REV. O circuit breaker reverteu o deploy — a task nova nao passou no health check. Ver os logs em /ecs/$SERVICO no CloudWatch."
+            exit 1
+          fi
+
+          RODANDO=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICO" \
+                      --query 'services[0].runningCount' --output text)
+          echo "::notice::Deploy concluido: $FAMILIA:$REV com $RODANDO task(s) rodando."
+          {
+            echo "- ECS: \`$CLUSTER\` / \`$SERVICO\` -> \`$FAMILIA:$REV\`"
+            echo "- tasks rodando: $RODANDO"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy GKE  (desativado)
         if: inputs.deploy_platform == 'gke'
