@@ -601,6 +601,7 @@ jobs:
         env:
           ENV_TARGET:   ${{ inputs.target_env }}
           SERVICO:      ${{ matrix.componente }}
+          APP:          ${{ matrix.app }}
           IMAGEM:       ${{ env.IMAGE_URI }}
           CLUSTER_PROD:  ${{ vars.ECS_CLUSTER_PROD }}
           CLUSTER_HOMOL: ${{ vars.ECS_CLUSTER_HOMOL }}
@@ -618,29 +619,137 @@ jobs:
           fi
           FAMILIA="${SERVICO}-${SUFIXO}"
 
-          # A familia da task definition e gerenciada pelo Terraform, que usa
+          # A familia da task definition e criada pelo Terraform, que usa
           # `ignore_changes = [task_definition]` justamente para a esteira
-          # poder registrar revisoes sem conflito. Partimos da revisao ativa
-          # e trocamos so a imagem.
+          # poder registrar revisoes sem conflito. Partimos da revisao ativa.
           echo "::group::Registrando nova revisao de $FAMILIA"
           aws ecs describe-task-definition --task-definition "$FAMILIA" \
             --query taskDefinition > /tmp/td-atual.json
 
-          # A troca e apenas no container homonimo ao componente: uma task
-          # pode ter init container ou sidecar, que nao devem ser tocados.
-          jq --arg img "$IMAGEM" --arg c "$SERVICO" '
-            .containerDefinitions = (.containerDefinitions
-              | map(if .name == $c then .image = $img else . end))
-            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
-                  .compatibilities, .registeredAt, .registeredBy,
-                  .deregisteredAt)
-          ' /tmp/td-atual.json > /tmp/td-nova.json
+          # Sobre a revisao ativa aplicamos a imagem nova e, se o repositorio
+          # tiver `infra/deploy/<papel>/infra.yaml`, os campos que o contrato
+          # declara. Sem o arquivo, o comportamento e o de sempre: so a imagem.
+          #
+          # O contrato manda apenas no que vive SO dentro da task definition —
+          # cpu, memory, variaveis, segredos e command. Porta, health check,
+          # roteamento, replicas e alarmes continuam com o Terraform, porque
+          # cada um deles tambem alimenta um recurso que o Terraform gerencia.
+          # Dois donos no mesmo campo produz divergencia silenciosa: a task
+          # sobe numa porta e o target group aponta para outra, o health check
+          # falha e o circuit breaker reverte parecendo deploy ruim.
+          pip install --quiet pyyaml
+          CONTRATO="infra/deploy/${APP}/infra.yaml" AMBIENTE="$SUFIXO" \
+          python3 <<'PYEOF'
+          import json, os, subprocess, sys
 
-          if ! jq -e --arg img "$IMAGEM" \
-               'any(.containerDefinitions[]; .image == $img)' /tmp/td-nova.json >/dev/null; then
-            echo "::error::Nenhum container chamado '$SERVICO' na familia '$FAMILIA'. O nome do componente em .github/pipeline.yml precisa ser igual ao nome do container."
-            exit 1
-          fi
+          TD_ATUAL, TD_NOVA = "/tmp/td-atual.json", "/tmp/td-nova.json"
+          SERVICO  = os.environ["SERVICO"]
+          IMAGEM   = os.environ["IMAGEM"]
+          CONTRATO = os.environ["CONTRATO"]
+          AMBIENTE = os.environ["AMBIENTE"]
+
+          td = json.load(open(TD_ATUAL))
+          for campo in ("taskDefinitionArn", "revision", "status", "requiresAttributes",
+                        "compatibilities", "registeredAt", "registeredBy", "deregisteredAt"):
+              td.pop(campo, None)
+
+          alvos = [c for c in td.get("containerDefinitions", []) if c.get("name") == SERVICO]
+          if not alvos:
+              nomes = ", ".join(c.get("name", "?") for c in td.get("containerDefinitions", [])) or "(nenhum)"
+              sys.exit(f"::error::Nenhum container chamado '{SERVICO}' na task definition. "
+                       f"Containers presentes: {nomes}. O `componente` em .github/pipeline.yml "
+                       f"precisa ser igual ao nome do container.")
+
+          # A imagem so troca no container homonimo: init container e sidecar nao sao tocados.
+          container = alvos[0]
+          container["image"] = IMAGEM
+
+          mudancas = []
+
+          tem_contrato = os.path.isfile(CONTRATO)
+          if not tem_contrato:
+              print(f"::notice::{CONTRATO} nao existe — deploy troca apenas a imagem. "
+                    f"A configuracao continua vindo do Terraform.")
+          else:
+              import yaml
+              c = yaml.safe_load(open(CONTRATO, encoding="utf-8"))
+
+              declarado = (c.get("metadata") or {}).get("component")
+              if declarado != SERVICO:
+                  sys.exit(f"::error::{CONTRATO} declara component '{declarado}', mas o deploy "
+                           f"e do componente '{SERVICO}'. O contrato esta no diretorio errado.")
+
+              rec = (c.get("resources") or {}).get(AMBIENTE) or {}
+              for chave, campo in (("cpu", "cpu"), ("memory", "memory")):
+                  novo = rec.get(chave)
+                  if novo is None:
+                      continue
+                  novo = str(novo)                      # a API do ECS quer string
+                  if td.get(campo) != novo:
+                      mudancas.append(f"{campo}: {td.get(campo)} -> {novo}")
+                      td[campo] = novo
+
+              variaveis = (c.get("configmap") or {}).get("variables") or {}
+              env_novo = sorted(
+                  ({"name": k, "value": str(v[AMBIENTE])} for k, v in variaveis.items()
+                   if isinstance(v, dict) and AMBIENTE in v),
+                  key=lambda e: e["name"])
+              env_antigo = sorted(container.get("environment", []), key=lambda e: e["name"])
+              if env_antigo != env_novo:
+                  antes = {e["name"] for e in env_antigo}
+                  depois = {e["name"] for e in env_novo}
+                  for n in sorted(depois - antes): mudancas.append(f"env + {n}")
+                  for n in sorted(antes - depois): mudancas.append(f"env - {n}")
+                  for n in sorted(antes & depois):
+                      a = next(e["value"] for e in env_antigo if e["name"] == n)
+                      d = next(e["value"] for e in env_novo if e["name"] == n)
+                      if a != d: mudancas.append(f"env ~ {n}: {a} -> {d}")
+                  container["environment"] = env_novo
+
+              chaves = (c.get("secret") or {}).get("keys") or []
+              if chaves:
+                  app = (c.get("metadata") or {}).get("application")
+                  nome_segredo = f"ebravo/{AMBIENTE}/{app}"
+                  # DescribeSecret devolve o ARN; o sufixo aleatorio nao da para construir
+                  # a partir do nome. Nao le valor — isso e GetSecretValue, que a role de
+                  # deploy nao tem de proposito.
+                  arn = subprocess.run(
+                      ["aws", "secretsmanager", "describe-secret", "--secret-id", nome_segredo,
+                       "--query", "ARN", "--output", "text"],
+                      capture_output=True, text=True).stdout.strip()
+                  if not arn.startswith("arn:"):
+                      sys.exit(f"::error::Nao consegui resolver o ARN de {nome_segredo}. "
+                               f"O segredo existe? A role de deploy tem secretsmanager:DescribeSecret?")
+                  sec_novo = sorted(({"name": k, "valueFrom": f"{arn}:{k}::"} for k in chaves),
+                                    key=lambda s: s["name"])
+              else:
+                  sec_novo = []
+              sec_antigo = sorted(container.get("secrets", []), key=lambda s: s["name"])
+              if sec_antigo != sec_novo:
+                  antes = {s["name"] for s in sec_antigo}
+                  depois = {s["name"] for s in sec_novo}
+                  for n in sorted(depois - antes): mudancas.append(f"secret + {n}")
+                  for n in sorted(antes - depois): mudancas.append(f"secret - {n}")
+                  container["secrets"] = sec_novo
+
+              cmd = (c.get("runtime") or {}).get("command")
+              if cmd != container.get("command"):
+                  mudancas.append(f"command: {container.get('command')} -> {cmd}")
+                  if cmd: container["command"] = cmd
+                  else:   container.pop("command", None)
+
+          json.dump(td, open(TD_NOVA, "w"), indent=2)
+
+          if mudancas:
+              print("::group::Mudancas de configuracao vindas de " + CONTRATO)
+              for m in mudancas:
+                  print("  " + m)
+              print("::endgroup::")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write(f"- config de `{CONTRATO}`: " + "; ".join(mudancas) + "\n")
+          elif tem_contrato:
+              print(f"::notice::Configuracao ja bate com {CONTRATO} — muda so a imagem.")
+          PYEOF
 
           REV=$(aws ecs register-task-definition --cli-input-json file:///tmp/td-nova.json \
                   --query 'taskDefinition.revision' --output text)
