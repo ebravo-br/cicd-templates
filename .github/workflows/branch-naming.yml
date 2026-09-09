@@ -26,8 +26,14 @@ name: Branch Naming - Reusable
 on:
   workflow_call:
     secrets:
+      # `required: false` nos dois de proposito. Com o PAT obrigatorio, apagar
+      # o secret PROJECT_PAT da organizacao quebraria estes workflows — e
+      # apaga-lo e justamente o objetivo, depois que o App estiver provado.
+      # Enquanto os dois convivem, o consumo prefere o App e cai no PAT.
       PROJECT_PAT:
-        required: true
+        required: false
+      APP_AUTOMACAO_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: read
