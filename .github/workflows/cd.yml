@@ -233,6 +233,25 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Token do GitHub App, no lugar do GH_TOKEN_BUMP.
+      #
+      # O bump de versao e commitado em branch protegida. Hoje isso passa
+      # porque o PAT pertence a alguem com admin e `enforce_admins: false` — o
+      # bypass depende do status administrativo de uma PESSOA, e o commit sai
+      # atribuido a ela, como se tivesse commitado a mao. Com o App o bypass e
+      # declarado na propria branch protection e o commit fica no nome do App.
+      #
+      # Gateado por `vars.APP_AUTOMACAO_ID`, igual ao ramo OIDC da AWS: vazio,
+      # cai no PAT e o comportamento e o de antes.
+      - name: Token do App
+        id: token
+        if: vars.APP_AUTOMACAO_ID != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_AUTOMACAO_ID }}
+          private-key: ${{ secrets.APP_AUTOMACAO_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Configurar identidade Git
         run: |
           git config user.name  'github-actions[bot]'
@@ -413,9 +432,12 @@ jobs:
           TEC:           ${{ matrix.tecnologia }}
           ENV_TARGET:    ${{ inputs.target_env }}
           GH_TOKEN_BUMP: ${{ secrets.GH_TOKEN_BUMP }}
+          APP_TOKEN:     ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          export GH_TOKEN="${GH_TOKEN_BUMP:-$GITHUB_TOKEN}"
+          # Ordem: App > PAT > GITHUB_TOKEN. O ultimo nao passa em
+          # branch protegida, e so serve para repositorio sem protecao.
+          export GH_TOKEN="${APP_TOKEN:-${GH_TOKEN_BUMP:-$GITHUB_TOKEN}}"
 
           python3 - <<'PY'
           import json, base64, re, os, subprocess, sys
@@ -552,8 +574,11 @@ jobs:
           APP:           ${{ matrix.app }}
           MONO:          ${{ matrix.monorepo }}
           GH_TOKEN_BUMP: ${{ secrets.GH_TOKEN_BUMP }}
+          APP_TOKEN:     ${{ steps.token.outputs.token }}
         run: |
-          export GH_TOKEN="${GH_TOKEN_BUMP:-$GITHUB_TOKEN}"
+          # Ordem: App > PAT > GITHUB_TOKEN. O ultimo nao passa em
+          # branch protegida, e so serve para repositorio sem protecao.
+          export GH_TOKEN="${APP_TOKEN:-${GH_TOKEN_BUMP:-$GITHUB_TOKEN}}"
           # Monorepo: prefixa a tag com a camada (ex.: api/1.97.0, web/1.92.0).
           # Single-repo: tag = numero puro (retrocompativel).
           if [ "$MONO" = "true" ]; then TAG="${APP}/${NEW}"; else TAG="$NEW"; fi

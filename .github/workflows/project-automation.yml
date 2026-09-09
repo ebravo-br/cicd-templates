@@ -71,6 +71,20 @@ jobs:
     name: Mover issue no projeto
     runs-on: ubuntu-latest
     steps:
+      # Token do GitHub App, no lugar do PAT.
+      #
+      # Gateado por `vars.APP_AUTOMACAO_ID`, mesmo padrao do ramo OIDC da AWS:
+      # enquanto a variavel estiver vazia, cai no PAT e o comportamento e o de
+      # antes. Permite migrar e so entao apagar os secrets.
+      - name: Token do App
+        id: token
+        if: vars.APP_AUTOMACAO_ID != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_AUTOMACAO_ID }}
+          private-key: ${{ secrets.APP_AUTOMACAO_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Determinar status alvo
         id: target
         run: |
@@ -86,7 +100,7 @@ jobs:
       - name: Mover issues vinculadas
         if: steps.target.outputs.status != ''
         env:
-          GH_TOKEN:       ${{ secrets.PROJECT_PAT }}
+          GH_TOKEN:       ${{ steps.token.outputs.token || secrets.PROJECT_PAT }}
           TARGET_STATUS:  ${{ steps.target.outputs.status }}
           PR_NUMBER:      ${{ github.event.pull_request.number }}
           ORG:            ${{ env.PROJECT_ORG }}
