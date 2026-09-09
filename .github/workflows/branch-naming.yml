@@ -37,9 +37,24 @@ jobs:
     name: Renomear branch pelo tipo da issue
     runs-on: ubuntu-latest
     steps:
+      # Token do GitHub App, no lugar do PAT.
+      #
+      # Gateado por `vars.APP_AUTOMACAO_ID`, mesmo padrao do ramo OIDC da AWS:
+      # enquanto a variavel estiver vazia, cai no PAT e o comportamento e o de
+      # antes. Permite migrar repositorio por repositorio e so entao apagar os
+      # secrets.
+      - name: Token do App
+        id: token
+        if: vars.APP_AUTOMACAO_ID != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_AUTOMACAO_ID }}
+          private-key: ${{ secrets.APP_AUTOMACAO_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Detectar e renomear
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          GH_TOKEN: ${{ steps.token.outputs.token || secrets.PROJECT_PAT }}
           BRANCH:   ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
           OWNER:    ${{ github.repository_owner }}
