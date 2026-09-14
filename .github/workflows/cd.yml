@@ -68,6 +68,22 @@ on:
         required: false
       GH_TOKEN_BUMP:
         required: false
+      # Faltava aqui, e so aparece quando o repositorio que chama esta em OUTRA
+      # organizacao. Dentro da ebravo-br o `secrets: inherit` do stub entrega
+      # ate o que nao esta declarado, entao o cd.yml funcionou por quatro
+      # repositorios sem esta linha. A tramar-br chama este mesmo workflow de
+      # fora, e ali o `inherit` nao vale -- a documentacao do GitHub limita o
+      # keyword a "the same organization or enterprise". O stub de la passa os
+      # segredos nome a nome, e passagem explicita so alcanca o que o
+      # workflow_call declara.
+      #
+      # Sintoma, no primeiro deploy do tramar-pedidos em 2026-09-14:
+      #   Error: Input required and not supplied: private-key
+      #
+      # O PR #11 declarou este mesmo segredo no branch-naming, no issue-epic e
+      # no project-automation; o cd.yml ficou de fora.
+      APP_AUTOMACAO_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: write
