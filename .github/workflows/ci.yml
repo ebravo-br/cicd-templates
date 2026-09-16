@@ -99,7 +99,16 @@ jobs:
                       'app': app, 'componente': comp, 'tecnologia': tec,
                       'node': g(sub,'node'), 'jdk': g(sub,'jdk'),
                       'python': g(sub,'python') or dp,
-                      'context': f'apps/{app}',
+                      # Contexto e Dockerfile declaraveis, com o padrao de antes.
+                      #
+                      # O default `apps/<app>` serve monorepo cujo app e
+                      # autocontido -- ebcare, datapat, tramar-pedidos. Nao
+                      # serve monorepo com workspace compartilhado: o
+                      # ebravo-signer tem `COPY packages/shared` e
+                      # `COPY package-lock.json` nos tres Dockerfiles, que so
+                      # resolvem a partir da RAIZ. Com contexto `apps/api` o
+                      # build quebra no COPY, nao no deploy.
+                      'context': g(sub, 'context') or f'apps/{app}',
                   })
           else:
               comp = g(cfg, 'componente')
