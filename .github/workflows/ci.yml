@@ -62,11 +62,34 @@ jobs:
                       return default
               return str(d) if d is not None else default
 
+          # Componentes do monorepo: vem do PROPRIO pipeline.yml, nao de uma
+          # lista fixa aqui dentro.
+          #
+          # Antes era `for app in ('api', 'web')` -- dois nomes cravados no
+          # workflow. Quem declarasse um terceiro componente nao recebia erro:
+          # o laco simplesmente nunca visitava a chave, nenhum job era criado,
+          # e o deploy terminava VERDE sem ter deployado. E o pior modo de
+          # falha que existe (ebravo-infra, docs/03).
+          #
+          # Descoberto ao migrar o ebravo-signer, que tem api (NestJS), web
+          # (Next.js) e worker (Python) -- tres componentes, com os tres
+          # repositorios ECR ja existentes.
+          #
+          # ADITIVO: um pipeline.yml com api+web produz exatamente a mesma
+          # matriz de antes.
+          RESERVADAS = {'monorepo', 'componente', 'tecnologia', 'jdk', 'node', 'python'}
+
+          def componentes_declarados(cfg):
+              return [k for k, v in cfg.items()
+                      if k not in RESERVADAS and isinstance(v, dict) and v.get('componente')]
           mono  = str(cfg.get('monorepo', False)).lower() == 'true'
           items = []
 
           if mono:
-              for app in ('api', 'web'):
+              declarados = componentes_declarados(cfg)
+              if not declarados:
+                  print('::error::monorepo: true mas nenhum componente declarado em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
+              for app in declarados:
                   sub  = cfg.get(app) or {}
                   comp = g(sub, 'componente')
                   tec  = g(sub, 'tecnologia')

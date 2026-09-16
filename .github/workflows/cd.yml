@@ -174,13 +174,48 @@ jobs:
               f = m.get(tec, 'package.json')
               return f'{base}/{f}'.lstrip('./')
 
+          # Componentes do monorepo: vem do PROPRIO pipeline.yml, nao de uma
+          # lista fixa aqui dentro.
+          #
+          # Antes era `for app in ('api', 'web')` -- dois nomes cravados no
+          # workflow. Quem declarasse um terceiro componente nao recebia erro:
+          # o laco simplesmente nunca visitava a chave, nenhum job era criado,
+          # e o deploy terminava VERDE sem ter deployado. E o pior modo de
+          # falha que existe (ebravo-infra, docs/03).
+          #
+          # Descoberto ao migrar o ebravo-signer, que tem api (NestJS), web
+          # (Next.js) e worker (Python) -- tres componentes, com os tres
+          # repositorios ECR ja existentes.
+          #
+          # ADITIVO: um pipeline.yml com api+web produz exatamente a mesma
+          # matriz de antes.
+          RESERVADAS = {'monorepo', 'componente', 'tecnologia', 'jdk', 'node', 'python'}
+
+          def componentes_declarados(cfg):
+              return [k for k, v in cfg.items()
+                      if k not in RESERVADAS and isinstance(v, dict) and v.get('componente')]
           mono  = str(cfg.get('monorepo', False)).lower() == 'true'
           items = []
 
           if mono:
+              declarados = componentes_declarados(cfg)
+              if not declarados:
+                  print('::error::monorepo: true mas nenhum componente declarado em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
               deploy_apps_raw = os.environ.get('DEPLOY_APPS', 'ambos').strip().lower()
-              deploy_apps = {'api', 'web'} if deploy_apps_raw == 'ambos' else {deploy_apps_raw}
-              for app in ('api', 'web'):
+              if deploy_apps_raw in ('', 'ambos', 'todos'):
+                  deploy_apps = set(declarados)
+              else:
+                  deploy_apps = {a.strip() for a in deploy_apps_raw.split(',') if a.strip()}
+                  # Pedir componente inexistente passa a ser ERRO. Antes,
+                  # `deploy_apps: worker` num repo api+web dava matriz vazia e
+                  # deploy verde sem deployar nada.
+                  fora = deploy_apps - set(declarados)
+                  if fora:
+                      print(f'::error::deploy_apps pede {sorted(fora)}, nao declarado em .github/pipeline.yml. Declarados: {sorted(declarados)}', file=sys.stderr)
+                      sys.exit(1)
+              for app in declarados:
+                  if app not in deploy_apps:
+                      continue
                   if app not in deploy_apps:
                       continue
                   sub  = cfg.get(app) or {}
