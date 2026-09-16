@@ -223,14 +223,23 @@ jobs:
                   tec  = g(sub, 'tecnologia')
                   if not comp or not tec:
                       continue
-                  df = f'infra/docker/{app}/Dockerfile'
+                  df = g(sub, 'dockerfile') or f'infra/docker/{app}/Dockerfile'
                   if not os.path.isfile(df):
                       print(f'::error::{df} nao existe', file=sys.stderr); sys.exit(1)
                   items.append({
                       'app': app, 'componente': comp, 'tecnologia': tec,
                       'node': g(sub,'node'), 'jdk': g(sub,'jdk'),
                       'python': g(sub,'python') or dp,
-                      'context': f'apps/{app}', 'dockerfile': df,
+                      # Contexto e Dockerfile declaraveis, com o padrao de antes.
+                      #
+                      # O default `apps/<app>` serve monorepo cujo app e
+                      # autocontido -- ebcare, datapat, tramar-pedidos. Nao
+                      # serve monorepo com workspace compartilhado: o
+                      # ebravo-signer tem `COPY packages/shared` e
+                      # `COPY package-lock.json` nos tres Dockerfiles, que so
+                      # resolvem a partir da RAIZ. Com contexto `apps/api` o
+                      # build quebra no COPY, nao no deploy.
+                      'context': g(sub, 'context') or f'apps/{app}', 'dockerfile': df,
                       'version_file': version_file(tec, f'apps/{app}'),
                       'monorepo': 'true',
                   })
