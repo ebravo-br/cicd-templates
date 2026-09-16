@@ -382,7 +382,13 @@ jobs:
           PY
           )
               ;;
-            python)                CUR=$(grep -m1 -oP '(?<=^version *= *")[^"]+' "$VERSION_FILE") ;;
+            # \K em vez de lookbehind: PCRE so aceita lookbehind de COMPRIMENTO
+            # FIXO, e `*` e variavel. O `(?<=^version *= *")` original abortava
+            # com `grep: lookbehind assertion is not fixed length` e exit 2 --
+            # quebrando TODO componente `tecnologia: python`. Nunca disparou
+            # porque o worker do ebravo-signer e o primeiro Python da
+            # organizacao a passar pela esteira (2026-09-16).
+            python)                CUR=$(grep -m1 -oP '^version *= *"\K[^"]+' "$VERSION_FILE") ;;
             *)                     CUR=$(node -p "require('./'+process.env.VERSION_FILE).version") ;;
           esac
           # Strips both old (-SNAPSHOT.TIMESTAMP) and new (-B{N}-{L}{N}) pre-release suffixes
@@ -446,7 +452,10 @@ jobs:
           PY
               ;;
             python)
-              sed -i -E "s/^version *= *\"[^\"]+\"/version = \"${NEW}\"/" "$VERSION_FILE"
+              # `0,/re/` limita a PRIMEIRA ocorrencia. Sem isso, um pyproject
+              # com outra chave `version` na coluna 0 (legal em TOML) teria
+              # todas reescritas com a versao do projeto.
+              sed -i -E "0,/^version *= *\"[^\"]+\"/s//version = \"${NEW}\"/" "$VERSION_FILE"
               ;;
             *)
               node -e "const fs=require('fs'),f=process.env.VERSION_FILE;const j=JSON.parse(fs.readFileSync(f));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
@@ -542,7 +551,8 @@ jobs:
                   sys.exit(1)
               updated = content[:target.start()] + target.group(1) + new + target.group(3) + content[target.end():]
           elif tec == 'python':
-              updated = re.sub(r'^version *= *"[^"]*"', f'version = "{new}"', content, flags=re.MULTILINE)
+              # count=1 pelo mesmo motivo do sed acima.
+              updated = re.sub(r'^version *= *"[^"]*"', f'version = "{new}"', content, count=1, flags=re.MULTILINE)
           else:
               pkg = json.loads(content)
               pkg['version'] = new
