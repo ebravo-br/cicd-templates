@@ -101,7 +101,12 @@ jobs:
 
       - name: Adicionar issue ao projeto e atribuir épico
         env:
-          GH_TOKEN:       ${{ steps.token.outputs.token || secrets.PROJECT_PAT }}
+          # Projeto e cross-org: o token do App e por organizacao, entao o App
+          # do caller so alcanca o ProjectV2 quando o caller E a PROJECT_ORG.
+          # Caller de outra org (ex.: tramar-br -> projeto da ebravo-br) precisa
+          # do PROJECT_PAT (PAT de usuario membro das duas orgs). O fallback final
+          # no App token preserva o comportamento quando nao ha PAT.
+          GH_TOKEN:       ${{ (github.repository_owner == env.PROJECT_ORG && steps.token.outputs.token) || secrets.PROJECT_PAT || steps.token.outputs.token }}
           EPIC:           ${{ steps.epic.outputs.epic }}
           ISSUE_ID:       ${{ github.event.issue.node_id }}
           ISSUE_NUMBER:   ${{ github.event.issue.number }}
