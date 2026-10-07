@@ -96,6 +96,7 @@ jobs:
           elif [[ "$REPO_LC" == acg* ]];            then echo "epic=ACG"       >> "$GITHUB_OUTPUT"
           elif [[ "$REPO_LC" == sensive* ]];        then echo "epic=SENSIVE"    >> "$GITHUB_OUTPUT"
           elif [[ "$REPO_LC" == rag* ]];            then echo "epic=EBRAG"      >> "$GITHUB_OUTPUT"
+          elif [[ "$REPO_LC" == ebravo-agents* ]];  then echo "epic=INFRA"     >> "$GITHUB_OUTPUT"
           else echo "epic=" >> "$GITHUB_OUTPUT"
           fi
 
