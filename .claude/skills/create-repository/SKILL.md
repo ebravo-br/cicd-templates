@@ -22,7 +22,8 @@ Exemplos:
 Parâmetros:
 - **repo**: nome do repositório (sem org prefix). Será criado em `ebravo-br/`.
 - **epic**: épico obrigatório (ver lista abaixo). **DEVE ser fornecido.**
-- **tecnologia**: `spring-boot-java`, `java`, `nodejs`, `angular` ou `python`. Se ausente, perguntar antes de continuar.
+- **tecnologia**: `spring-boot-java`, `java`, `nodejs`, `angular`, `python` ou `docker`. Se ausente, perguntar antes de continuar.
+  `docker` é para imagem montada só pelo Dockerfile, sem etapa de build de linguagem (ex.: empacotar um software de terceiros como o GLPI). A esteira não roda build e lê a versão do `package.json` da raiz (`cd.yml`, fallback de `version_file`).
 - **componente**: nome do serviço/componente. Se ausente, usar o nome do repo.
 
 ---
@@ -42,6 +43,8 @@ Parâmetros:
 | `ACG` | `acg-*` |
 | `SENSIVE` | `sensive-*` |
 | `EBRAG` | `rag-*` |
+| `INFRA` | `ebravo-agents*` |
+| `HELPDESK` | `ebravo-helpdesk*` |
 
 Se o épico informado não estiver nessa lista, **pare** e informe o usuário que é necessário:
 1. Adicionar a opção ao campo "Épico" no GitHub Project #2 (`ebravo-br / Ebravo Projetos`)
@@ -78,6 +81,8 @@ Se `epic` não foi informado ou está vazio, **pare** e exiba:
   ACG        → repos acg-*
   SENSIVE    → repos sensive-*
   EBRAG      → repos rag-*
+  INFRA      → repos ebravo-agents*
+  HELPDESK   → repos ebravo-helpdesk*
 
 Se o épico do projeto ainda não existe nessa lista, informe o nome desejado
 e explique que precisará ser criado manualmente antes de continuar.
@@ -96,9 +101,10 @@ Para criar um novo épico é necessário:
 
    elif [[ "$REPO_LC" == <prefixo>* ]]; then echo "epic=<X>" >> "$GITHUB_OUTPUT"
 
-Após criar o épico no projeto e mesclar o PR, execute este comando novamente.
+Após criar o épico no projeto e mesclar o PR, criar uma tag nova do cicd-templates
+no commit mesclado (ver "Tag dos stubs" no Passo 5) e executar este comando novamente.
 
-Épicos válidos agora: TRAMAR, EBDOCS, EBCARE, CEMITERIO, ERS, ATOS, DATAPAT, TOTEM, ACG, SENSIVE, EBRAG
+Épicos válidos agora: TRAMAR, EBDOCS, EBCARE, CEMITERIO, ERS, ATOS, DATAPAT, TOTEM, ACG, SENSIVE, EBRAG, INFRA, HELPDESK
 ```
 
 Não avançar para o Passo 1 sem épico válido confirmado.
@@ -204,6 +210,10 @@ EOF
 
 O repo foi recém-criado — não há SHA preexistente. Usar PUT direto para todos os arquivos.
 
+**Tag dos stubs: `@v5`.** Todos os stubs apontam para a mesma tag. Nunca mover a `v1` (compartilhada com a `tramar-br`, V8 no `ebravo-infra`) nem mover tag existente para incluir mudança nova: criar a próxima (`v6`...) e atualizar este passo. Uma regra nova no `issue-epic.yml` só vale para os repos cujo stub aponta para uma tag que a contém.
+
+Para repo que roda **só em homologação**, travar `target_env: [homologacao]` e `deploy_platform: [ec2]` nos stubs de deploy e rollback (como no `ebscan-app`).
+
 #### 5a — `.github/workflows/ci.yml`
 
 ```bash
@@ -214,11 +224,7 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - 'feature/**'
-      - 'hotfix/**'
-      - 'bugfix/**'
+    branches: [main, develop, 'feature/**', 'bug/**', 'task/**']
 
 permissions:
   contents: read
@@ -230,7 +236,7 @@ concurrency:
 jobs:
   ci:
     if: toJson(github.event.commits) != '[]'
-    uses: ebravo-br/cicd-templates/.github/workflows/ci.yml@v1
+    uses: ebravo-br/cicd-templates/.github/workflows/ci.yml@v5
 EOF
 )
 ENCODED=$(printf '%s' "$CONTENT" | base64)
@@ -274,7 +280,7 @@ concurrency:
 
 jobs:
   cd:
-    uses: ebravo-br/cicd-templates/.github/workflows/cd.yml@v1
+    uses: ebravo-br/cicd-templates/.github/workflows/cd.yml@v5
     secrets: inherit
     with:
       target_env:      ${{ inputs.target_env }}
@@ -299,10 +305,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Tag da imagem (ex: 1.5.0). Deixe vazio para listar as 10 mais recentes.'
+        description: 'Tag da imagem para voltar (ex: 1.5.0). Obrigatória.'
         type: string
-        required: false
-        default: ''
+        required: true
       target_env:
         description: 'Ambiente alvo'
         type: choice
@@ -326,7 +331,7 @@ concurrency:
 
 jobs:
   rollback:
-    uses: ebravo-br/cicd-templates/.github/workflows/rollback.yml@v1
+    uses: ebravo-br/cicd-templates/.github/workflows/rollback.yml@v5
     secrets: inherit
     with:
       image_tag:       ${{ inputs.image_tag }}
@@ -357,7 +362,7 @@ permissions:
 
 jobs:
   project:
-    uses: ebravo-br/cicd-templates/.github/workflows/project-automation.yml@v1
+    uses: ebravo-br/cicd-templates/.github/workflows/project-automation.yml@v5
     secrets: inherit
 EOF
 )
@@ -384,13 +389,35 @@ permissions:
 
 jobs:
   epic:
-    uses: ebravo-br/cicd-templates/.github/workflows/issue-epic.yml@v1
+    uses: ebravo-br/cicd-templates/.github/workflows/issue-epic.yml@v5
     secrets: inherit
 EOF
 )
 ENCODED=$(printf '%s' "$CONTENT" | base64)
 gh api -X PUT repos/ebravo-br/<repo>/contents/.github/workflows/issue-epic.yml \
   --field message="ci: instalar stub de issue epic ebravo-br" \
+  --field content="$ENCODED"
+```
+
+#### 5f — `.github/workflows/branch-naming.yml`
+
+```bash
+CONTENT=$(cat <<'EOF'
+# >>> NAO EDITE ESTE ARQUIVO <<<
+# Logica em: ebravo-br/cicd-templates/.github/workflows/branch-naming.yml
+name: Branch Naming
+on:
+  create:
+permissions:
+  contents: write
+jobs:
+  rename:
+    uses: ebravo-br/cicd-templates/.github/workflows/branch-naming.yml@v5
+EOF
+)
+ENCODED=$(printf '%s' "$CONTENT" | base64)
+gh api -X PUT repos/ebravo-br/<repo>/contents/.github/workflows/branch-naming.yml \
+  --field message="ci: instalar stub de branch naming ebravo-br" \
   --field content="$ENCODED"
 ```
 
@@ -420,6 +447,23 @@ componente: <componente>
 tecnologia: <tecnologia>
 python: '3.12'   # omitir se for o padrão 3.12
 ```
+
+Para `docker`:
+```yaml
+componente: <componente>
+tecnologia: docker
+```
+
+E criar também o `package.json` da raiz, que só carrega a versão (a esteira lê e grava `version` nele):
+```json
+{
+  "name": "<repo>",
+  "version": "1.0.0",
+  "private": true
+}
+```
+
+> O nome do componente define onde o `cd.yml` procura o contrato: componente single-repo que não é Java nem Python é tratado como `web`, e o contrato fica em `infra/deploy/web/infra.yaml`. O validador do `ebravo-infra` exige que componente em `deploy/web/` termine em `-web`. Para tecnologia `docker` com deploy em ECS, **usar componente terminando em `-web`**.
 
 Para monorepo (api + web):
 ```yaml
@@ -504,6 +548,12 @@ COPY dist/ .
 ENTRYPOINT ["python", "-m", "<componente>"]
 ```
 
+Para `docker`: não há template. O Dockerfile é o do software empacotado (`FROM` da imagem oficial fixada por versão e digest, mais a configuração própria). Criar um placeholder que falhe o build até ser substituído:
+```dockerfile
+# Substituir pelo Dockerfile real do componente.
+FROM scratch
+```
+
 > **Monorepo**: criar `infra/docker/api/Dockerfile` (Java) e `infra/docker/web/Dockerfile` (Node/Angular).
 
 Criar via API:
@@ -553,6 +603,8 @@ totem*                   → TOTEM
 acg*                     → ACG
 sensive*                 → SENSIVE
 rag*                     → EBRAG
+ebravo-agents*           → INFRA
+ebravo-helpdesk*         → HELPDESK
 (sem match)              → (nenhum)
 ```
 
@@ -583,11 +635,23 @@ gh api orgs/ebravo-br/actions/secrets | jq '[.secrets[].name]'
 gh api orgs/ebravo-br/actions/variables/DEPLOY_PROD_ALLOWED 2>/dev/null
 ```
 
-Secrets obrigatórias: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SSH_KEY_HOMOL`, `SSH_KEY_PROD`, `GH_TOKEN_BUMP`, `PROJECT_PAT`.
+Secrets obrigatórias na org: `APP_AUTOMACAO_PRIVATE_KEY`, `SSH_KEY_HOMOL`, `SSH_KEY_PROD`. Variáveis da org: `APP_AUTOMACAO_ID`, `DEPLOY_PROD_ALLOWED`, `ECS_CLUSTER_HOMOL`, `ECS_CLUSTER_PROD`.
 
-Se `GH_TOKEN_BUMP` estiver ausente, instruir:
-1. `github.com/settings/tokens` → Generate new token (classic), scopes: `repo`
-2. `gh secret set GH_TOKEN_BUMP --org ebravo-br --visibility all --body "<TOKEN>"`
+O bump de versão usa o GitHub App (`APP_AUTOMACAO_ID` + `APP_AUTOMACAO_PRIVATE_KEY`); `GH_TOKEN_BUMP` é só fallback e pode não existir.
+
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` são o caminho antigo. Repo novo usa **OIDC**: criar os environments `homologacao` e `producao` no repo, cada um com a variável `AWS_DEPLOY_ROLE_ARN`:
+
+```bash
+for env in homologacao producao; do
+  gh api -X PUT repos/ebravo-br/<repo>/environments/$env --silent
+done
+gh variable set AWS_DEPLOY_ROLE_ARN -R ebravo-br/<repo> --env homologacao \
+  --body arn:aws:iam::851479049298:role/github-actions-deploy-homol
+gh variable set AWS_DEPLOY_ROLE_ARN -R ebravo-br/<repo> --env producao \
+  --body arn:aws:iam::851479049298:role/github-actions-deploy-prod
+```
+
+A role só aceita o repo depois que ele entrar na trust policy, no `ebravo-infra` (PR pela skill `mudanca-terraform`): `deploy_repositories` em `terraform/environments/prod/locals.tf`, o ID numérico em `repository_ids` (`prod/main.tf`) e a lista de homologação em `homol/main.tf`. O ID sai de `gh api repos/ebravo-br/<repo> -q .id`. Listar isso nos próximos passos do resumo.
 
 Se `PROJECT_PAT` estiver ausente, instruir:
 1. `github.com/settings/tokens` → Generate new token (classic), scopes: `project`, `repo`, `read:org`
@@ -616,6 +680,7 @@ Workflows
 .github/workflows/rollback.yml                 ✓ criado
 .github/workflows/project-automation.yml       ✓ criado
 .github/workflows/issue-epic.yml               ✓ criado
+.github/workflows/branch-naming.yml            ✓ criado
 .github/pipeline.yml                           ✓ criado
 
 Infra
@@ -625,7 +690,8 @@ infra/compose/docker-compose.yml               ✓ criado
 GitHub
 Branch protection (main)                       ✓ configurada  (1 reviewer, enforce_admins OFF, push: juniorebravo)
 Org secrets (AWS + SSH)                        ✓ ok | ⚠ faltam: [lista]
-Org secret GH_TOKEN_BUMP                       ✓ ok | ⚠ ausente — bump de versão não vai funcionar
+Environments homologacao/producao (OIDC)      ✓ criados com AWS_DEPLOY_ROLE_ARN
+Trust OIDC no ebravo-infra                     ⚠ pendente — PR em ebravo-infra
 Org secret PROJECT_PAT                         ✓ ok | ⚠ ausente — automação de projeto não vai funcionar
 Org variable DEPLOY_PROD_ALLOWED               ✓ ok | ⚠ ausente
 
