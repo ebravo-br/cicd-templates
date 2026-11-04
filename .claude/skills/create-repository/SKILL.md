@@ -137,15 +137,7 @@ gh repo create ebravo-br/<repo> \
 
 `--add-readme` cria um commit inicial na branch `main`, necessário para que a branch protection seja aplicada na sequência.
 
-Após a criação, aplicar as configurações padrão da org:
-
-```bash
-gh api -X PATCH repos/ebravo-br/<repo> \
-  --field delete_branch_on_merge=true \
-  --field allow_squash_merge=false \
-  --field allow_merge_commit=true \
-  --field allow_rebase_merge=false
-```
+As opções de merge ficam no padrão do GitHub, que é o que os repos da org usam (conferido em datapat, ebcare, ebdocs, cemiterio-campo-limpo e ebravo-agents em 2026-11-03): squash, merge commit e rebase habilitados, `delete_branch_on_merge` desligado. Não aplicar PATCH.
 
 Exibir a URL do repositório criado.
 
@@ -163,9 +155,10 @@ Exibir os times encontrados ao usuário.
 
 #### 3b — Aplicar permissões
 
-Regra padrão:
-- Times cujo slug contém `admin` ou `ops` → permissão `admin`
-- Demais times → permissão `push`
+Regra padrão (a dos repos existentes):
+- `techleads` → `admin`
+- `devs` → `push`
+- Outros times (ex.: `lumminy`, terceiro) → **não** adicionar, salvo pedido explícito
 
 Se a classificação automática for ambígua (ex: nenhum time claramente admin, ou múltiplos times admin), **perguntar ao usuário** qual nível dar a cada time antes de prosseguir.
 
@@ -187,22 +180,28 @@ gh api -X PUT repos/ebravo-br/<repo>/branches/main/protection \
     "strict": false,
     "contexts": []
   },
-  "enforce_admins": false,
+  "enforce_admins": true,
   "required_pull_request_reviews": {
     "required_approving_review_count": 1,
-    "dismiss_stale_reviews": false,
-    "require_code_owner_reviews": false
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false,
+    "require_last_push_approval": false,
+    "bypass_pull_request_allowances": {"users": ["juniorebravo"], "teams": [], "apps": ["ebravo-sync-infra"]}
   },
   "restrictions": {
-    "users": ["juniorebravo"],
-    "teams": [],
-    "apps": ["github-actions"]
+    "users": ["juniorebravo", "ricsimiaoebravo"],
+    "teams": ["techleads"],
+    "apps": ["ebravo-sync-infra"]
   },
   "allow_force_pushes": false,
   "allow_deletions": false
 }
 EOF
 ```
+
+Este é o JSON da proteção do `datapat` (e dos demais repos de aplicação). `ebravo-sync-infra` é o GitHub App da esteira (`APP_AUTOMACAO_ID`): ele precisa estar no push e no bypass para o commit de versão do deploy entrar na `main`.
+
+**Ordem:** aplicar a proteção **depois** dos Passos 5 a 7, que gravam os arquivos direto na `main` pela API. Com a proteção ligada antes, esses PUTs dependeriam do bypass. Se preferir (ou se a gravação direta for bloqueada), subir os arquivos numa branch `task/estrutura-padrao` com PR.
 
 ---
 
@@ -413,6 +412,7 @@ permissions:
 jobs:
   rename:
     uses: ebravo-br/cicd-templates/.github/workflows/branch-naming.yml@v5
+    secrets: inherit
 EOF
 )
 ENCODED=$(printf '%s' "$CONTENT" | base64)
@@ -688,7 +688,7 @@ infra/docker/Dockerfile                        ✓ criado  (template <tecnologia
 infra/compose/docker-compose.yml               ✓ criado
 
 GitHub
-Branch protection (main)                       ✓ configurada  (1 reviewer, enforce_admins OFF, push: juniorebravo)
+Branch protection (main)                       ✓ configurada  (igual ao datapat: 1 reviewer, enforce_admins ON, bypass juniorebravo + ebravo-sync-infra)
 Org secrets (AWS + SSH)                        ✓ ok | ⚠ faltam: [lista]
 Environments homologacao/producao (OIDC)      ✓ criados com AWS_DEPLOY_ROLE_ARN
 Trust OIDC no ebravo-infra                     ⚠ pendente — PR em ebravo-infra
