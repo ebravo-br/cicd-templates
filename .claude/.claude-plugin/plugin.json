@@ -1,0 +1,5 @@
+{
+  "name": "ebravo",
+  "description": "Skills de organizacao da ebravo-br: create-repository, add-techlead e migrate-to-monorepo",
+  "author": { "name": "ebravo-br" }
+}

@@ -141,3 +141,10 @@ Aplicado em `ebravo-br` e `tramar-br`. Como a role está no team, qualquer membr
 **Member vs maintainer do team:** o `all_repo_admin` dá admin nos repositórios individualmente, mas para gerenciar a aba *Repositories* do próprio team (dropdown de Role + botão "Add repository") o usuário precisa ser **maintainer** do `techleads`, não só `member`. Adicionar/promover: `gh api -X PUT /orgs/{org}/teams/techleads/memberships/{user} -f role=maintainer`.
 
 Para conceder o pacote completo de tech lead a um novo usuário (membership + maintainer no techleads nas duas orgs), use a skill **`add-techlead`** (`.claude/skills/add-techlead/`).
+
+## Skills como plugin do Claude Code
+
+As skills de `.claude/skills/` são a **fonte única** das skills de organização. Este repositório também é um marketplace de plugin (`.claude-plugin/marketplace.json`), cujo plugin `ebravo` tem a própria pasta `.claude/` como raiz. Outros repositórios, como o `ebravo-infra`, declaram o plugin no `.claude/settings.json` e recebem as skills como `/ebravo:create-repository`, `/ebravo:add-techlead` e `/ebravo:migrate-to-monorepo`, sem cópia.
+
+Mudou uma skill? Basta o merge aqui. Quem usa o plugin recebe a versão nova no `claude plugin update ebravo@ebravo-br` (ou na atualização automática do marketplace). Não precisa de tag da esteira.
+

@@ -1,0 +1,12 @@
+{
+  "name": "ebravo-br",
+  "description": "Skills de organizacao da ebravo-br para o Claude Code",
+  "owner": { "name": "ebravo-br" },
+  "plugins": [
+    {
+      "name": "ebravo",
+      "source": "./.claude",
+      "description": "create-repository, add-techlead e migrate-to-monorepo"
+    }
+  ]
+}
