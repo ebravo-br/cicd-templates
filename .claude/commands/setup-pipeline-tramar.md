@@ -151,7 +151,7 @@ on:
         type: choice
         required: true
         default: ec2
-        options: [ec2, ecs, gke]
+        options: [ec2, ecs]
 
 permissions:
   contents: write
@@ -203,7 +203,7 @@ on:
         type: choice
         required: true
         default: ec2
-        options: [ec2, ecs, gke]
+        options: [ec2, ecs]
 
 permissions:
   contents: read
