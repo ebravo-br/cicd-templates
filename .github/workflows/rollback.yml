@@ -24,7 +24,7 @@ on:
         type: string
         required: true
       deploy_platform:
-        description: 'ec2 (ativo) | ecs | gke (futuros)'
+        description: 'ec2 | ecs'
         type: string
         required: false
         default: ec2
@@ -322,10 +322,6 @@ jobs:
           fi
           echo "::notice::Rollback concluido: $SERVICO em $TAG ($FAMILIA:$REV)."
           echo "- ECS: \`$CLUSTER\` / \`$SERVICO\` -> \`$FAMILIA:$REV\` (\`$TAG\`)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Rollback GKE  (desativado)
-        if: inputs.deploy_platform == 'gke'
-        run: echo "::warning::Rollback GKE ainda nao habilitado." && exit 0
 
       # ---- Resumo -----------------------------------------------------
       - name: Resumo

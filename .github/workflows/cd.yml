@@ -44,7 +44,7 @@ on:
         type: string
         required: true
       deploy_platform:
-        description: 'ec2 (ativo) | ecs | gke (futuros)'
+        description: 'ec2 | ecs'
         type: string
         required: false
         default: ec2
@@ -878,13 +878,6 @@ jobs:
             echo "- ECS: \`$CLUSTER\` / \`$SERVICO\` -> \`$FAMILIA:$REV\`"
             echo "- tasks rodando: $RODANDO"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Deploy GKE  (desativado)
-        if: inputs.deploy_platform == 'gke'
-        run: |
-          echo "::warning::Deploy GKE ainda nao habilitado."
-          # kubectl set image deployment/${{ matrix.componente }} ${{ matrix.componente }}=${IMAGE_URI}
-          exit 0
 
       - name: Resumo
         if: always()
