@@ -113,7 +113,7 @@ Campo opcional por componente no `.github/pipeline.yml` (no bloco do componente,
 api:
   componente: ebcare-api
   tecnologia: nodejs
-  migrate: npm run migrate:deploy
+  migrate: npx prisma migrate deploy
 ```
 
 O `cd.yml` roda o comando **com a imagem nova, antes de a versão nova subir**, e para o deploy se ele sair com código diferente de 0. A versão anterior continua no ar.
@@ -127,6 +127,22 @@ Duas regras para quem escreve a migration:
 2. **Rollback não desfaz migration.** O `rollback.yml` troca só a imagem.
 
 O comando precisa existir **na imagem final**: CLI de migration em `dependencies`, não em `devDependencies`, quando o Dockerfile instala com `--omit=dev`.
+
+#### Checagem das migrations no CI (`migrate_check`)
+
+Campo opcional, ao lado do `migrate`. Com ele, o `ci.yml` ganha o job **Migrations**: sobe um MySQL 8.0 descartável no próprio runner, entrega `DATABASE_URL` e `SHADOW_DATABASE_URL` vazios e roda o comando no contexto do componente. Saiu diferente de 0, o push fica vermelho. Não toca homologação nem produção.
+
+```yaml
+api:
+  migrate: npx prisma migrate deploy
+  migrate_check: >-
+    npx prisma migrate deploy &&
+    npx prisma migrate diff --from-migrations prisma/migrations
+    --to-schema-datamodel prisma/schema.prisma
+    --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
+```
+
+O primeiro comando pega migration que não aplica do zero; o segundo, schema alterado sem a migration correspondente. Sem o campo, nenhum job a mais roda.
 
 #### Checagem de migration destrutiva
 

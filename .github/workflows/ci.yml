@@ -12,6 +12,10 @@
 #
 #  Nao gera imagem Docker nem faz push para o ECR.
 #  Para deploy use cd.yml.
+#
+#  Componente com `migrate_check` no pipeline.yml ganha um job a mais:
+#  aplica todas as migrations num MySQL descartavel do proprio runner e
+#  roda o comando de checagem. Nao toca homologacao nem producao.
 # =====================================================================
 
 name: CI - Reusable (Build)
@@ -36,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.props.outputs.matrix }}
+      migracoes: ${{ steps.props.outputs.migracoes }}
     steps:
       - uses: actions/checkout@v4
 
@@ -109,6 +114,7 @@ jobs:
                       # resolvem a partir da RAIZ. Com contexto `apps/api` o
                       # build quebra no COPY, nao no deploy.
                       'context': g(sub, 'context') or f'apps/{app}',
+                      'migrate_check': g(sub, 'migrate_check'),
                   })
           else:
               comp = g(cfg, 'componente')
@@ -120,12 +126,15 @@ jobs:
                   'node': g(cfg,'node'), 'jdk': g(cfg,'jdk'),
                   'python': g(cfg,'python') or dp,
                   'context': '.',
+                  'migrate_check': g(cfg, 'migrate_check'),
               })
 
           if not items:
               print('::error::nenhum componente em .github/pipeline.yml', file=sys.stderr); sys.exit(1)
 
           out.write(f"matrix={json.dumps({'include': items})}\n")
+          migracoes = [i for i in items if i['migrate_check']]
+          out.write(f"migracoes={json.dumps({'include': migracoes}) if migracoes else ''}\n")
           print(json.dumps({'include': items}, indent=2))
           PY
 
@@ -201,3 +210,84 @@ jobs:
           python -m pip install --upgrade pip
           [ -f requirements.txt ] && pip install -r requirements.txt || true
           if [ -f pyproject.toml ]; then pip install build && python -m build; fi
+
+  # ===================================================================
+  # 3. MIGRATIONS — banco descartavel, so para quem declara migrate_check
+  # ===================================================================
+  # A regra das migrations (schema e migrations sem diferenca, migration
+  # que aplica do zero) dependia de cada dev lembrar de rodar o comando.
+  # No ebcare, a primeira comparacao com producao achou 16 CHECK fora do
+  # marco zero e uma coluna, um indice e tres tipos divergindo do schema:
+  # o proximo `migrate dev` levaria isso de carona numa migration qualquer.
+  #
+  # O comando e do repositorio, nao daqui: a esteira so entrega um MySQL
+  # vazio em DATABASE_URL e outro em SHADOW_DATABASE_URL. Para Prisma:
+  #
+  #   migrate_check: >-
+  #     npx prisma migrate deploy &&
+  #     npx prisma migrate diff --from-migrations prisma/migrations
+  #     --to-schema-datamodel prisma/schema.prisma
+  #     --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
+  #
+  # MySQL 8.0 porque e o que o Aurora roda. Repositorio com outro banco
+  # precisa de outro service aqui antes de declarar o campo.
+  migrations:
+    name: Migrations • ${{ matrix.componente }}
+    needs: setup
+    if: needs.setup.outputs.migracoes != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.migracoes) }}
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci
+          MYSQL_DATABASE: app
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      DATABASE_URL:        mysql://root:ci@127.0.0.1:3306/app
+      SHADOW_DATABASE_URL: mysql://root:ci@127.0.0.1:3306/shadow
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Banco de shadow
+        run: mysql -h 127.0.0.1 -uroot -pci -e 'CREATE DATABASE shadow'
+
+      # ---- Node --------------------------------------------------------
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
+        id: nodever
+        run: |
+          NV="${{ matrix.node }}"; NV="${NV#node}"
+          echo "v=${NV:-${{ env.DEFAULT_NODE }}}" >> "$GITHUB_OUTPUT"
+          LOCKFILE="${{ matrix.context }}/package-lock.json"
+          [ -f "$LOCKFILE" ] && echo "cache=npm" >> "$GITHUB_OUTPUT" || echo "cache=" >> "$GITHUB_OUTPUT"
+
+      - if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.nodever.outputs.v }}
+          cache: ${{ steps.nodever.outputs.cache }}
+          cache-dependency-path: ${{ matrix.context }}/package-lock.json
+
+      - name: NPM install
+        if: matrix.tecnologia == 'nodejs' || matrix.tecnologia == 'angular' || matrix.tecnologia == 'react'
+        working-directory: ${{ matrix.context }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
+          else                              npm install --legacy-peer-deps; fi
+
+      - name: Checagem das migrations
+        working-directory: ${{ matrix.context }}
+        env:
+          MIGRATE_CHECK: ${{ matrix.migrate_check }}
+        run: |
+          set -euo pipefail
+          if ! sh -c "$MIGRATE_CHECK"; then
+            echo "::error::Checagem de migrations falhou em ${{ matrix.componente }}. Ou uma migration nao aplica num banco vazio, ou o schema mudou sem a migration correspondente: rode o comando localmente e crie a migration que falta."
+            exit 1
+          fi
