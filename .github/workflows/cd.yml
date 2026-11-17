@@ -14,7 +14,9 @@
 #    2. Build (compile/package ja com a nova versao)
 #    3. Commit do bump [skip ci]
 #    4. Build e push da imagem Docker -> ECR
-#    5. Deploy SSH -> EC2
+#    5. Migration de banco, se o componente declarar `migrate` no
+#       .github/pipeline.yml (ver o passo "Migration de banco (EC2)")
+#    6. Deploy SSH -> EC2, ou ECS
 #
 #  Formato de versao gerado:
 #    homologacao  ->  {versao}-B{run}-{tipo}{issue}
@@ -53,6 +55,14 @@ on:
         type: string
         required: false
         default: ambos
+      # Libera o deploy quando a checagem de migration encontra comando que
+      # apaga ou altera dado (ver o passo "Checagem de migration destrutiva").
+      # Stub que nao declara este input nunca libera: o deploy para e explica.
+      confirmar_migration_destrutiva:
+        description: 'Confirmo que revisei as migrations destrutivas listadas'
+        type: boolean
+        required: false
+        default: false
     secrets:
       # Deixaram de ser obrigatorios: quando a variavel AWS_DEPLOY_ROLE_ARN
       # existe, a autenticacao e por OIDC e nao ha access key nenhuma.
@@ -242,6 +252,7 @@ jobs:
                       'context': g(sub, 'context') or f'apps/{app}', 'dockerfile': df,
                       'version_file': version_file(tec, f'apps/{app}'),
                       'monorepo': 'true',
+                      'migrate': g(sub, 'migrate'),
                   })
           else:
               comp = g(cfg, 'componente')
@@ -264,6 +275,7 @@ jobs:
                   'context': '.', 'dockerfile': df,
                   'version_file': version_file(tec, '.'),
                   'monorepo': 'false',
+                  'migrate': g(cfg, 'migrate'),
               })
 
           if not items:
@@ -292,6 +304,107 @@ jobs:
           ref: ${{ needs.setup.outputs.ref }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- Checagem de migration destrutiva ------------------------------
+      # So para componente com `migrate` no pipeline.yml. Lista os comandos
+      # que apagam ou alteram dado nas migrations que ainda nao foram para
+      # producao: os .sql em `.../migration(s)/...` do componente que mudaram
+      # desde a ultima release de producao dele ({app}/{versao} em monorepo).
+      #
+      # O Prisma nao tem migration de volta, e o MySQL confirma DDL comando a
+      # comando. Um DROP aplicado so volta por backup, e o Aurora e
+      # compartilhado por todas as aplicacoes -- restaurar o cluster nao e
+      # opcao. Por isso o comando destrutivo exige confirmacao explicita.
+      #
+      # Producao: sempre ligada. Homologacao: so com a variavel
+      # MIGRATION_GATE_HOMOL=true no repositorio (para ensaio).
+      #
+      # Roda ANTES do bump e do build de proposito: um deploy barrado nao deixa
+      # versao commitada nem imagem no ECR, e a release de producao deste run
+      # ainda nao existe, entao a comparacao e com a anterior.
+      - name: Checagem de migration destrutiva
+        if: matrix.migrate != ''
+        env:
+          ENV_TARGET: ${{ inputs.target_env }}
+          GATE_HOMOL: ${{ vars.MIGRATION_GATE_HOMOL }}
+          CONFIRMADO: ${{ inputs.confirmar_migration_destrutiva }}
+          CONTEXTO:   ${{ matrix.context }}
+          APP:        ${{ matrix.app }}
+          MONO:       ${{ matrix.monorepo }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os, re, subprocess, sys
+
+          env, contexto = os.environ['ENV_TARGET'], os.environ['CONTEXTO'].rstrip('/') or '.'
+          ligada = env == 'producao' or os.environ.get('GATE_HOMOL', '').lower() == 'true'
+          confirmado = os.environ.get('CONFIRMADO', '').lower() == 'true'
+          resumo = open(os.environ['GITHUB_STEP_SUMMARY'], 'a')
+
+          def git(*a):
+              return subprocess.run(['git', *a], capture_output=True, text=True, check=True).stdout
+
+          padrao = f"{os.environ['APP']}/*" if os.environ['MONO'] == 'true' else '[0-9]*'
+          tags = [t for t in git('tag', '--list', padrao, '--sort=-v:refname', '--merged', 'HEAD').split() if t]
+          base = tags[0] if tags else None
+
+          alvo = [] if contexto == '.' else ['--', contexto]
+          if base:
+              arquivos = git('diff', '--name-only', '--diff-filter=AM', f'{base}..HEAD', *alvo).split()
+          else:
+              arquivos = git('ls-files', *alvo).split()
+          arquivos = [f for f in arquivos if f.endswith('.sql') and re.search(r'/migrations?/', '/' + f)]
+
+          # Data loss ou quebra de compatibilidade com o codigo anterior. DROP de
+          # INDEX/KEY/FOREIGN KEY/CONSTRAINT nao entra: o Prisma remove e recria
+          # indice e chave o tempo todo, e isso nao apaga dado.
+          REGRAS = [
+              (r'\bDROP\s+(TABLE|DATABASE|SCHEMA|VIEW)\b',                      'apaga objeto'),
+              (r'\bDROP\s+(?!(INDEX|KEY|FOREIGN|PRIMARY|CONSTRAINT|CHECK|DEFAULT|TABLE|DATABASE|SCHEMA|VIEW)\b)(COLUMN\s+)?`?\w', 'apaga coluna'),
+              (r'\bTRUNCATE\b',                                                  'apaga dados'),
+              (r'\bDELETE\s+FROM\b',                                           'apaga dados'),
+              (r'\bUPDATE\s+`?\w+`?\s+SET\b',                                 'altera dados'),
+              (r'\b(MODIFY|CHANGE)\s+(COLUMN\s+)?`?\w',                         'muda tipo de coluna'),
+              (r'\bRENAME\s+(TABLE|COLUMN|TO)\b',                               'renomeia'),
+          ]
+          achados = []
+          for f in arquivos:
+              sql = open(f, encoding='utf-8', errors='replace').read()
+              sql = re.sub(r'/\*.*?\*/', lambda m: re.sub(r'[^\n]', ' ', m.group()), sql, flags=re.S)
+              for n, linha in enumerate(sql.splitlines(), 1):
+                  linha = re.sub(r'(--|#).*$', '', linha)
+                  for rx, tipo in REGRAS:
+                      if re.search(rx, linha, re.I):
+                          achados.append((f, n, tipo, linha.strip()[:160]))
+                          break
+
+          origem = f'desde a release `{base}`' if base else 'sem release de producao anterior (todas)'
+          print(f'Migrations conferidas ({origem}): {len(arquivos)} arquivo(s)')
+          if not achados:
+              print('Nenhum comando destrutivo.')
+              resumo.write(f'- migrations: {len(arquivos)} arquivo(s) {origem}, nenhum comando destrutivo\n')
+              sys.exit(0)
+
+          resumo.write(f'### Migration destrutiva ({origem})\n\n| Arquivo | Linha | Tipo | Comando |\n|---|---|---|---|\n')
+          for f, n, tipo, l in achados:
+              print(f'::warning file={f},line={n}::{tipo}: {l}')
+              cel = l.replace('|', '\\|')
+              resumo.write(f'| `{f}` | {n} | {tipo} | `` {cel} `` |\n')
+          resumo.write('\n')
+
+          if not ligada:
+              print(f'::notice::{len(achados)} comando(s) destrutivo(s) listado(s). Checagem desligada em {env}: segue.')
+              sys.exit(0)
+          if confirmado:
+              print(f'::notice::{len(achados)} comando(s) destrutivo(s) CONFIRMADO(S) por {os.environ.get("GITHUB_ACTOR")}.')
+              resumo.write(f'Confirmado por `{os.environ.get("GITHUB_ACTOR")}`.\n')
+              sys.exit(0)
+          print(f'::error::{len(achados)} comando(s) que apagam ou alteram dado nas migrations (ver anotacoes e o resumo). '
+                f'Nada foi alterado: o deploy parou antes do bump, do build e da migration. Para seguir: revisar o SQL, '
+                f'garantir backup (snapshot) e rodar o deploy de novo marcando "confirmar_migration_destrutiva". '
+                f'Se o input nao aparece, o stub deploy.yml precisa declara-lo e repassa-lo ao cd.yml.')
+          sys.exit(1)
+          PY
 
       # Token do GitHub App, no lugar do GH_TOKEN_BUMP.
       #
@@ -673,6 +786,54 @@ jobs:
           fi
           chmod 600 ~/.ssh/deploy_key
 
+      # ---- Migration de banco ------------------------------------------
+      # Opcional, por componente: `migrate: <comando>` no .github/pipeline.yml
+      # (no bloco do componente, em monorepo). Sem o campo, nada muda.
+      #
+      # Roda ANTES de a versao nova subir, com a IMAGEM NOVA, e para o deploy
+      # se falhar: a versao antiga continua no ar e o banco nao recebe a
+      # aplicacao que dependeria da migration. Consequencia que o time da
+      # aplicacao precisa conhecer: durante a troca a versao ANTIGA roda contra
+      # o banco ja migrado, entao cada migration precisa ser compativel com o
+      # codigo anterior (adicionar numa entrega, remover em outra).
+      #
+      # Rollback (rollback.yml) troca so a imagem. Migration aplicada nao se
+      # desfaz por ele.
+      #
+      # EC2: `docker-compose run` do proprio servico, e nao `docker run`. Assim
+      # a migration herda a rede e o env_file que o compose declara -- os nomes
+      # das redes diferem entre os hosts (deploy_ebravo-network em homol,
+      # deploy_app-network em prod) e o compose ja sabe. `run` nao publica as
+      # portas (sem --service-ports) nem usa o container_name, entao convive
+      # com o container que esta no ar.
+      - name: Migration de banco (EC2)
+        if: inputs.deploy_platform == 'ec2' && matrix.migrate != ''
+        env:
+          ENV_TARGET: ${{ inputs.target_env }}
+          COMP:       ${{ matrix.componente }}
+          IMAGEM:     ${{ env.IMAGE_URI }}
+          MIGRATE:    ${{ matrix.migrate }}
+        run: |
+          set -euo pipefail
+          if [ "$ENV_TARGET" = "producao" ]; then
+            HOST="ec2-user@ec2-18-230-19-215.sa-east-1.compute.amazonaws.com"
+            DIR="/home/ec2-user/deploy"
+          else
+            HOST="ubuntu@54.232.76.143"
+            DIR="/home/ubuntu/deploy"
+          fi
+          REGISTRY="${IMAGEM%%/*}"
+          echo "::notice::Migration de $COMP com $IMAGEM: $MIGRATE"
+          # printf %q: o comando vem do repositorio da aplicacao e atravessa um
+          # shell remoto; sem escapar, aspas e ; dele seriam reinterpretados.
+          REMOTO=$(printf 'cd %q && aws ecr get-login-password --region %q | docker login --username AWS --password-stdin %q >/dev/null && PROJETO=%q IMAGEM=%q docker-compose -f docker-compose.yml run --rm --no-deps -T --entrypoint sh %q -c %q' \
+            "$DIR" "$AWS_REGION" "$REGISTRY" "$COMP" "$IMAGEM" "$COMP" "$MIGRATE")
+          if ! ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" "$REMOTO"; then
+            echo "::error::Migration falhou em $ENV_TARGET. Deploy interrompido: a versao anterior de $COMP continua no ar. A saida acima e a do comando de migration."
+            exit 1
+          fi
+          echo "- migration: \`$MIGRATE\` OK" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Deploy via SSH (EC2)
         if: inputs.deploy_platform == 'ec2'
         env:
@@ -700,6 +861,7 @@ jobs:
           IMAGEM:       ${{ env.IMAGE_URI }}
           CLUSTER_PROD:  ${{ vars.ECS_CLUSTER_PROD }}
           CLUSTER_HOMOL: ${{ vars.ECS_CLUSTER_HOMOL }}
+          MIGRATE:       ${{ matrix.migrate }}
         run: |
           set -euo pipefail
 
@@ -850,6 +1012,61 @@ jobs:
                   --query 'taskDefinition.revision' --output text)
           echo "::notice::Registrada $FAMILIA:$REV com $IMAGEM"
           echo "::endgroup::"
+
+          # Migration de banco: task avulsa com a revisao NOVA (mesma imagem,
+          # segredos e rede do servico), comando trocado pelo `migrate` do
+          # pipeline.yml. So depois de ela sair com 0 o servico e atualizado.
+          # Regras de compatibilidade e rollback: ver "Migration de banco (EC2)".
+          if [ -n "$MIGRATE" ]; then
+            echo "::group::Migration de banco: $MIGRATE"
+            REDE=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICO" \
+                     --query 'services[0].networkConfiguration' --output json)
+            OVR=$(jq -cn --arg n "$SERVICO" --arg c "$MIGRATE" \
+                    '{containerOverrides: [{name: $n, command: ["sh", "-c", $c]}]}')
+            # launch-type FARGATE mesmo onde o servico usa Spot: e uma task curta,
+            # e Spot pode ser interrompido no meio de um ALTER TABLE.
+            TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$FAMILIA:$REV" \
+                     --launch-type FARGATE --network-configuration "$REDE" \
+                     --overrides "$OVR" --started-by esteira-migration \
+                     --query 'tasks[0].taskArn' --output text)
+            if [ -z "$TASK" ] || [ "$TASK" = "None" ]; then
+              echo "::error::run-task nao criou a task de migration. Deploy interrompido; o servico nao foi tocado."
+              exit 1
+            fi
+            echo "task: $TASK"
+
+            # Sem o waiter do CLI: ele desiste em 10 min, e migration grande
+            # passa disso. Ate 60 min, conferindo a cada 15 s.
+            for _ in $(seq 240); do
+              ST=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" \
+                     --query 'tasks[0].lastStatus' --output text)
+              [ "$ST" = "STOPPED" ] && break
+              sleep 15
+            done
+            if [ "$ST" != "STOPPED" ]; then
+              echo "::error::A migration nao terminou em 60 min (status $ST). Deploy interrompido. A task $TASK continua rodando: decidir se espera ou para."
+              exit 1
+            fi
+
+            SAIDA=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" \
+                      --query "tasks[0].containers[?name=='$SERVICO'] | [0].exitCode" --output text)
+            MOTIVO=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" \
+                       --query 'tasks[0].stoppedReason' --output text)
+            PREFIXO=$(jq -r --arg n "$SERVICO" '.containerDefinitions[] | select(.name == $n)
+                        | .logConfiguration.options["awslogs-stream-prefix"] // empty' /tmp/td-nova.json)
+            GRUPO=$(jq -r --arg n "$SERVICO" '.containerDefinitions[] | select(.name == $n)
+                      | .logConfiguration.options["awslogs-group"] // empty' /tmp/td-nova.json)
+            STREAM="${PREFIXO:+$PREFIXO/}$SERVICO/${TASK##*/}"
+            echo "::endgroup::"
+            # exitCode vazio ("None") = o container nem chegou a rodar: imagem,
+            # segredo ou rede. O stoppedReason diz qual.
+            if [ "$SAIDA" != "0" ]; then
+              echo "::error::Migration falhou (exitCode=$SAIDA, motivo: $MOTIVO). Deploy interrompido: o servico continua em ${FAMILIA}, revisao anterior. Log: $GRUPO / $STREAM"
+              exit 1
+            fi
+            echo "::notice::Migration concluida (task ${TASK##*/})."
+            echo "- migration: \`$MIGRATE\` OK (log \`$GRUPO\` / \`$STREAM\`)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           aws ecs update-service --cluster "$CLUSTER" --service "$SERVICO" \
             --task-definition "$FAMILIA:$REV" >/dev/null
