@@ -105,6 +105,31 @@ web:
   node: '20'
 ```
 
+### Migration de banco (`migrate`)
+
+Campo opcional por componente no `.github/pipeline.yml` (no bloco do componente, em monorepo; na raiz, em repo de componente único). Sem o campo, o deploy é o de sempre.
+
+```yaml
+api:
+  componente: ebcare-api
+  tecnologia: nodejs
+  migrate: npm run migrate:deploy
+```
+
+O `cd.yml` roda o comando **com a imagem nova, antes de a versão nova subir**, e para o deploy se ele sair com código diferente de 0. A versão anterior continua no ar.
+
+- **EC2:** `docker-compose run --rm --no-deps` do próprio serviço, no host do ambiente. Herda a rede e o `env_file` do compose, não publica portas e convive com o container no ar.
+- **ECS:** `run-task` avulsa com a revisão nova da task definition (mesma imagem, segredos e rede do serviço), `launch-type FARGATE` mesmo onde o serviço usa Spot. Só depois de ela sair com 0 vem o `update-service`. O log fica no log group do serviço; o resumo do job mostra o stream.
+
+Duas regras para quem escreve a migration:
+
+1. **Compatível com o código anterior.** Durante a troca, a versão antiga roda contra o banco já migrado. Adicionar numa entrega, remover em outra.
+2. **Rollback não desfaz migration.** O `rollback.yml` troca só a imagem.
+
+O comando precisa existir **na imagem final**: CLI de migration em `dependencies`, não em `devDependencies`, quando o Dockerfile instala com `--omit=dev`.
+
+No ECS, a role de deploy precisa de `ecs:RunTask` (ver `ebravo-infra`, módulo `cicd-oidc`).
+
 Para consolidar um par `*-api` + `*-web` num monorepo (histórico preservado, esteira monorepo, herança de permissões, arquivamento das origens), use a skill **`migrate-to-monorepo`** (`.claude/skills/migrate-to-monorepo/`).
 
 ### Monorepos migrados
