@@ -128,6 +128,33 @@ Duas regras para quem escreve a migration:
 
 O comando precisa existir **na imagem final**: CLI de migration em `dependencies`, não em `devDependencies`, quando o Dockerfile instala com `--omit=dev`.
 
+#### Checagem de migration destrutiva
+
+Para componente com `migrate`, o primeiro passo do job de deploy lista os comandos que apagam ou alteram dado nas migrations que ainda não foram para produção. Lê os `.sql` em `.../migration(s)/...` do componente que mudaram desde a última release de produção dele (`{app}/{versao}` em monorepo).
+
+| Pega | Não pega (o Prisma gera o tempo todo, e não apaga dado) |
+|---|---|
+| `DROP TABLE`/`DATABASE`/`VIEW`, `DROP [COLUMN] col`, `TRUNCATE`, `DELETE FROM`, `UPDATE ... SET`, `MODIFY`/`CHANGE` de coluna, `RENAME` | `DROP INDEX`/`KEY`/`FOREIGN KEY`/`PRIMARY KEY`/`CONSTRAINT`/`DEFAULT`, `ON DELETE`/`ON UPDATE`, comentários |
+
+Com achado, o deploy **para**, antes do bump, do build e da migration, até ser rodado de novo com o input `confirmar_migration_destrutiva` marcado. Os achados aparecem como anotação no job e numa tabela no resumo, e a confirmação registra quem confirmou.
+
+- **Produção:** sempre ligada.
+- **Homologação:** desligada. Só lista, a não ser que o repositório tenha a variável `MIGRATION_GATE_HOMOL=true` (para ensaio).
+
+O stub precisa declarar e repassar o input para poder confirmar. Sem ele, um deploy de produção com migration destrutiva não passa, e o erro explica:
+
+```yaml
+# deploy.yml (stub), em workflow_dispatch.inputs
+      confirmar_migration_destrutiva:
+        description: 'Confirmo que revisei as migrations destrutivas listadas'
+        type: boolean
+        default: false
+# e em jobs.cd.with
+      confirmar_migration_destrutiva: ${{ inputs.confirmar_migration_destrutiva }}
+```
+
+O porquê: o Prisma não tem migration de volta, o MySQL confirma DDL comando a comando, e o Aurora é compartilhado por todas as aplicações. Um `DROP` aplicado só volta restaurando backup num cluster à parte e reimportando o dado.
+
 No ECS, a role de deploy precisa de `ecs:RunTask` (ver `ebravo-infra`, módulo `cicd-oidc`).
 
 Para consolidar um par `*-api` + `*-web` num monorepo (histórico preservado, esteira monorepo, herança de permissões, arquivamento das origens), use a skill **`migrate-to-monorepo`** (`.claude/skills/migrate-to-monorepo/`).
