@@ -19,6 +19,7 @@
 #    6. Deploy SSH -> EC2, ou ECS
 #
 #  Formato de versao gerado:
+#    desenvolvimento e
 #    homologacao  ->  {versao}-B{run}-{tipo}{issue}
 #                     Ex: 1.52.0-B34-F1   (Build 34, Feature issue 1)
 #                         1.52.0-B2-B55   (Build 2, Bug issue 55)
@@ -42,7 +43,7 @@ on:
   workflow_call:
     inputs:
       target_env:
-        description: 'homologacao | producao'
+        description: 'desenvolvimento | homologacao | producao'
         type: string
         required: true
       deploy_platform:
@@ -299,6 +300,24 @@ jobs:
     environment:
       name: ${{ inputs.target_env }}
     steps:
+      # desenvolvimento: terceiro ambiente, na MESMA EC2 de homologacao, com os
+      # servicos do compose de la sufixados com -dev (ebcare-api-dev). So EC2:
+      # nao ha cluster ECS de dev. Valor fora da lista cairia no caminho de
+      # homologacao sem aviso -- os passos abaixo decidem por "producao ou nao".
+      - name: Validar ambiente
+        env:
+          ENV_TARGET: ${{ inputs.target_env }}
+          PLATAFORMA: ${{ inputs.deploy_platform }}
+        run: |
+          case "$ENV_TARGET" in
+            desenvolvimento|homologacao|producao) ;;
+            *) echo "::error::target_env '$ENV_TARGET' invalido. Use desenvolvimento, homologacao ou producao."; exit 1 ;;
+          esac
+          if [ "$ENV_TARGET" = "desenvolvimento" ] && [ "$PLATAFORMA" != "ec2" ]; then
+            echo "::error::desenvolvimento so existe na EC2 de homologacao (deploy_platform: ec2). Nao ha cluster ECS de dev."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.setup.outputs.ref }}
@@ -506,7 +525,10 @@ jobs:
           esac
           # Strips both old (-SNAPSHOT.TIMESTAMP) and new (-B{N}-{L}{N}) pre-release suffixes
           BASE=$(echo "$CUR" | sed -E 's/(-SNAPSHOT[._][0-9]+|-B[0-9]+(-[FBT][0-9]+)?)$//')
-          if [ "$ENV_TARGET" = "homologacao" ]; then
+          # Tudo que nao e producao (homologacao e desenvolvimento) ganha versao
+          # de build. Antes o teste era `= homologacao`: um terceiro ambiente
+          # caia no else e recebia o bump de minor de producao.
+          if [ "$ENV_TARGET" != "producao" ]; then
             # Formato: {versao}-B{run_number}-{tipo}{issue}
             #   B = Build (numero sequencial do workflow run)
             #   F = Feature  (branch feature/{N})
@@ -582,7 +604,9 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci  --legacy-peer-deps
           else                              npm install --legacy-peer-deps; fi
-          if   npm run | grep -qE '^\s+build-homol' && [ "${{ inputs.target_env }}" = "homologacao" ]; then
+          if   npm run | grep -qE '^\s+build-dev'   && [ "${{ inputs.target_env }}" = "desenvolvimento" ]; then
+            npm run build-dev
+          elif npm run | grep -qE '^\s+build-homol' && [ "${{ inputs.target_env }}" = "homologacao" ]; then
             npm run build-homol
           elif npm run | grep -qE '^\s+build-prod'  && [ "${{ inputs.target_env }}" = "producao"    ]; then
             npm run build-prod
@@ -822,14 +846,18 @@ jobs:
             HOST="ubuntu@54.232.76.143"
             DIR="/home/ubuntu/deploy"
           fi
+          # Servico no compose: desenvolvimento usa o mesmo host de homologacao
+          # com servicos sufixados (ebcare-api-dev). A imagem continua a do
+          # repositorio ECR do componente, sem sufixo.
+          SVC="$COMP"; [ "$ENV_TARGET" = "desenvolvimento" ] && SVC="${COMP}-dev"
           REGISTRY="${IMAGEM%%/*}"
-          echo "::notice::Migration de $COMP com $IMAGEM: $MIGRATE"
+          echo "::notice::Migration de $SVC com $IMAGEM: $MIGRATE"
           # printf %q: o comando vem do repositorio da aplicacao e atravessa um
           # shell remoto; sem escapar, aspas e ; dele seriam reinterpretados.
           REMOTO=$(printf 'cd %q && aws ecr get-login-password --region %q | docker login --username AWS --password-stdin %q >/dev/null && PROJETO=%q IMAGEM=%q docker-compose -f docker-compose.yml run --rm --no-deps -T --entrypoint sh %q -c %q' \
-            "$DIR" "$AWS_REGION" "$REGISTRY" "$COMP" "$IMAGEM" "$COMP" "$MIGRATE")
+            "$DIR" "$AWS_REGION" "$REGISTRY" "$SVC" "$IMAGEM" "$SVC" "$MIGRATE")
           if ! ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" "$REMOTO"; then
-            echo "::error::Migration falhou em $ENV_TARGET. Deploy interrompido: a versao anterior de $COMP continua no ar. A saida acima e a do comando de migration."
+            echo "::error::Migration falhou em $ENV_TARGET. Deploy interrompido: a versao anterior de $SVC continua no ar. A saida acima e a do comando de migration."
             exit 1
           fi
           echo "- migration: \`$MIGRATE\` OK" >> "$GITHUB_STEP_SUMMARY"
@@ -849,8 +877,11 @@ jobs:
             HOST="ubuntu@54.232.76.143"
             SCRIPT="/home/ubuntu/deploy/deploy.sh"
           fi
+          # desenvolvimento: servico sufixado no compose de homologacao. O
+          # deploy.sh tira o -dev para achar a imagem no ECR.
+          SVC="$COMP"; [ "$ENV_TARGET" = "desenvolvimento" ] && SVC="${COMP}-dev"
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
-            "$SCRIPT $COMP $NEW"
+            "$SCRIPT $SVC $NEW"
 
       - name: Deploy ECS
         if: inputs.deploy_platform == 'ecs'
