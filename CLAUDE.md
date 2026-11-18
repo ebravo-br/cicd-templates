@@ -8,14 +8,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Versionamento das tags — leia antes de mexer
 
-| Tag | Aponta para | Quem usa | Comportamento |
-|---|---|---|---|
-| `v1` | commit fixo `95948a0` | todos os repositórios, das duas orgs | deploy por SSH no EC2; access key estática |
-| `v2` | `main` | repositórios já migrados para ECS | deploy por ECS; OIDC quando `AWS_DEPLOY_ROLE_ARN` existe |
+Toda tag é fixa: aponta para um commit e não se move. Tag nova leva tudo o que está na `main` naquele momento.
+
+| Tag | Commit | O que trouxe |
+|---|---|---|
+| `v8` | `b49fe6f` | `migrate_check` no `ci.yml`: migrations aplicadas num MySQL descartável e comparadas com o schema a cada push (#24) |
+| `v7` | `dde60f3` | `migrate` no `cd.yml` (migration com a imagem nova antes de trocar a versão) e checagem de migration destrutiva (#23) |
+| `v6` | `0e7d27c` | Sem `gke`: `deploy_platform` só com `ec2` e `ecs` (#21, #22) |
+| `v5` | `63e734f` | Épico `HELPDESK`; `create-repository` no padrão atual (#18) |
+| `v4` | `1a7b7cc` | `PROJECT_PAT` no `issue-epic` para projeto cross-org (#16) |
+| `v3` | `7a240d9` | `context` e `dockerfile` declaráveis no `pipeline.yml` de monorepo (#14) |
+| `v2` | `50fbd4d` | Deploy por ECS; OIDC quando `AWS_DEPLOY_ROLE_ARN` existe |
+| `v1` | `95948a0` | Deploy por SSH no EC2; access key estática. Compartilhada pela `ebravo-br` e pela `tramar-br` |
+
+Em 2026-11-18, o `ebcare` usa a `v8` e os outros 14 repositórios com deploy usam a `v6`. Quem usa o quê, e por quê, fica em `ebravo-br/ebravo-infra`, `docs/contexto/esteira-cicd.md`.
 
 **Não mova a `v1`.** Ela é compartilhada pela `ebravo-br` e pela `tramar-br`, e um `git tag -f v1` altera o deploy de todas as empresas no mesmo instante, sem revisão e sem aviso. O hábito antigo era exatamente esse (`git tag -f v1 HEAD && git push --force origin v1`); ele funcionava porque só havia um caminho de deploy.
 
-Mudança de comportamento entra em tag nova. Cada repositório migra trocando `@v1` por `@v2` no seu `deploy.yml` e `rollback.yml`, quando a aplicação dele for migrada para o ECS — o que também é o caminho de volta: reverter para `@v1` restaura o deploy por SSH.
+Mudança de comportamento entra em tag nova. Cada repositório migra trocando o `@vN` dos seus stubs, e voltar para a tag anterior é o caminho de volta.
 
 Contexto e plano completos em `ebravo-br/ebravo-infra` (V8 em `docs/05`, Fase 4 em `docs/03`).
 
@@ -23,7 +33,7 @@ Contexto e plano completos em `ebravo-br/ebravo-infra` (V8 em `docs/05`, Fase 4 
 
 | Arquivo | Descrição |
 |---|---|
-| `cd.yml` | Build + bump de versão + ECR + deploy SSH |
+| `cd.yml` | Build + bump de versão + ECR + migration de banco (opcional) + deploy por SSH no EC2 ou por ECS |
 | `ci.yml` | Build only (sem Docker/ECR) |
 | `rollback.yml` | Rollback para tag anterior no ECR |
 | `issue-epic.yml` | Adiciona issue ao projeto e define Épico/Status |
@@ -162,7 +172,7 @@ O stub precisa declarar e repassar o input para poder confirmar. Sem ele, um dep
 ```yaml
 # deploy.yml (stub), em workflow_dispatch.inputs
       confirmar_migration_destrutiva:
-        description: 'Confirmo que revisei as migrations destrutivas listadas'
+        description: 'Só produção: confirmo que revisei as migrations destrutivas listadas'
         type: boolean
         default: false
 # e em jobs.cd.with
