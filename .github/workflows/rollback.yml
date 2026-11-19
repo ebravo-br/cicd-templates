@@ -20,7 +20,7 @@ on:
         type: string
         required: true
       target_env:
-        description: 'homologacao | producao'
+        description: 'desenvolvimento | homologacao | producao'
         type: string
         required: true
       deploy_platform:
@@ -178,7 +178,29 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    # Como no cd.yml: o AWS_DEPLOY_ROLE_ARN e variavel do GitHub Environment.
+    # Sem esta chave o job nao a enxerga e cai nas chaves estaticas.
+    environment:
+      name: ${{ inputs.target_env }}
     steps:
+      # desenvolvimento: terceiro ambiente, na MESMA EC2 de homologacao, com os
+      # servicos do compose de la sufixados com -dev (ebcare-api-dev). So EC2:
+      # nao ha cluster ECS de dev. Valor fora da lista cairia no caminho de
+      # homologacao sem aviso -- os passos abaixo decidem por "producao ou nao".
+      - name: Validar ambiente
+        env:
+          ENV_TARGET: ${{ inputs.target_env }}
+          PLATAFORMA: ${{ inputs.deploy_platform }}
+        run: |
+          case "$ENV_TARGET" in
+            desenvolvimento|homologacao|producao) ;;
+            *) echo "::error::target_env '$ENV_TARGET' invalido. Use desenvolvimento, homologacao ou producao."; exit 1 ;;
+          esac
+          if [ "$ENV_TARGET" = "desenvolvimento" ] && [ "$PLATAFORMA" != "ec2" ]; then
+            echo "::error::desenvolvimento so existe na EC2 de homologacao (deploy_platform: ec2). Nao ha cluster ECS de dev."
+            exit 1
+          fi
+
       - name: Credenciais AWS via OIDC
         if: vars.AWS_DEPLOY_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@v4
@@ -256,8 +278,9 @@ jobs:
             HOST="ubuntu@54.232.76.143"
             SCRIPT="/home/ubuntu/deploy/deploy.sh"
           fi
+          SVC="$COMP"; [ "$ENV_TARGET" = "desenvolvimento" ] && SVC="${COMP}-dev"
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$HOST" \
-            "$SCRIPT $COMP $TAG"
+            "$SCRIPT $SVC $TAG"
 
       # Mesma mecanica do deploy, com a imagem vinda da tag informada em vez
       # de um build novo. Nada e reconstruido — volta-se a um artefato que

@@ -12,6 +12,7 @@ Toda tag é fixa: aponta para um commit e não se move. Tag nova leva tudo o que
 
 | Tag | Commit | O que trouxe |
 |---|---|---|
+| `v9` | (a criar) | `target_env: desenvolvimento`: terceiro ambiente, na EC2 de homologação, com serviços `-dev`; `rollback.yml` passa a usar o GitHub Environment |
 | `v8` | `b49fe6f` | `migrate_check` no `ci.yml`: migrations aplicadas num MySQL descartável e comparadas com o schema a cada push (#24) |
 | `v7` | `dde60f3` | `migrate` no `cd.yml` (migration com a imagem nova antes de trocar a versão) e checagem de migration destrutiva (#23) |
 | `v6` | `0e7d27c` | Sem `gke`: `deploy_platform` só com `ec2` e `ecs` (#21, #22) |
@@ -87,6 +88,31 @@ Bump do minor: `1.52.0` → `1.53.0`
 | Monorepo | `{app}/{versao}` | `api/1.97.0`, `web/1.92.0` |
 
 O prefixo (`api`/`web`) sai de `matrix.app`. A imagem no ECR usa sempre `{componente}:{versao}` (sem prefixo). Homologação não cria tag/release.
+
+## Ambiente de desenvolvimento (`desenvolvimento`)
+
+Desde a `v9`, `target_env` aceita `desenvolvimento`, além de `homologacao` e `producao`. Valor fora da lista falha no primeiro passo, em vez de cair calado no caminho de homologação.
+
+| | desenvolvimento | homologacao | producao |
+|---|---|---|---|
+| Onde roda | EC2 de homologação, serviço `<componente>-dev` | EC2 de homologação, serviço `<componente>` | EC2 de produção ou ECS |
+| Versão | `{versao}-B{run}-{tipo}{issue}` | igual | bump do minor + release |
+| Build npm | `build-dev` se existir | `build-homol` se existir | `build-prod` se existir |
+| Imagem Docker | `--build-arg ENV_TARGET=desenvolvimento` | `ENV_TARGET=homologacao` | `ENV_TARGET=producao` |
+| Checagem de migration destrutiva | só avisa | só avisa (ou bloqueia com `MIGRATION_GATE_HOMOL=true`) | bloqueia sem confirmação |
+| ECS | não existe: falha no primeiro passo | `ECS_CLUSTER_HOMOL` | `ECS_CLUSTER_PROD` |
+
+O serviço `-dev` usa a **mesma imagem** do componente: o `deploy.sh` de homologação tira o sufixo `-dev` para achar o repositório no ECR. Não existe repositório ECR por ambiente.
+
+Para habilitar num repositório (primeiro foi o `ebcare`, em 2026-11-18):
+
+1. Na EC2 de homologação: banco próprio, serviços `<componente>-dev` no `docker-compose.yml` com portas próprias, e um `env_file` extra com o que muda em relação a homologação.
+2. No `ebravo-infra`: CloudFront e DNS dos domínios de dev e log groups `/ec2/homol/<componente>-dev`.
+3. GitHub Environment `desenvolvimento` no repositório, com `AWS_DEPLOY_ROLE_ARN` da role `github-actions-deploy-homol`.
+4. Stubs na `v9` com `options: [desenvolvimento, homologacao, producao]` no `deploy.yml` e no `rollback.yml`.
+5. Front-end com URL de API embutida no build: um script `build-dev` e o ramo `desenvolvimento` no Dockerfile.
+
+A partir da `v9`, o job do `rollback.yml` também declara `environment: ${{ inputs.target_env }}`, como o `cd.yml` já fazia. Antes, o `AWS_DEPLOY_ROLE_ARN` do environment não chegava ao rollback, que caía nas chaves estáticas.
 
 ## Monorepo
 
