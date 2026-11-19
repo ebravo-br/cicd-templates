@@ -12,7 +12,7 @@ Toda tag é fixa: aponta para um commit e não se move. Tag nova leva tudo o que
 
 | Tag | Commit | O que trouxe |
 |---|---|---|
-| `v9` | (a criar) | `target_env: desenvolvimento`: terceiro ambiente, na EC2 de homologação, com serviços `-dev`; `rollback.yml` passa a usar o GitHub Environment |
+| `v9` | `a4d069d` | `target_env: desenvolvimento`: terceiro ambiente, na EC2 de homologação, com serviços `-dev`; `rollback.yml` passa a usar o GitHub Environment |
 | `v8` | `b49fe6f` | `migrate_check` no `ci.yml`: migrations aplicadas num MySQL descartável e comparadas com o schema a cada push (#24) |
 | `v7` | `dde60f3` | `migrate` no `cd.yml` (migration com a imagem nova antes de trocar a versão) e checagem de migration destrutiva (#23) |
 | `v6` | `0e7d27c` | Sem `gke`: `deploy_platform` só com `ec2` e `ecs` (#21, #22) |
@@ -22,7 +22,7 @@ Toda tag é fixa: aponta para um commit e não se move. Tag nova leva tudo o que
 | `v2` | `50fbd4d` | Deploy por ECS; OIDC quando `AWS_DEPLOY_ROLE_ARN` existe |
 | `v1` | `95948a0` | Deploy por SSH no EC2; access key estática. Compartilhada pela `ebravo-br` e pela `tramar-br` |
 
-Em 2026-11-18, o `ebcare` usa a `v8` e os outros 14 repositórios com deploy usam a `v6`. Quem usa o quê, e por quê, fica em `ebravo-br/ebravo-infra`, `docs/contexto/esteira-cicd.md`.
+Em 2026-11-19, o `ebcare` usa a `v9` e os outros 14 repositórios com deploy usam a `v6`. Quem usa o quê, e por quê, fica em `ebravo-br/ebravo-infra`, `docs/contexto/esteira-cicd.md`.
 
 **Não mova a `v1`.** Ela é compartilhada pela `ebravo-br` e pela `tramar-br`, e um `git tag -f v1` altera o deploy de todas as empresas no mesmo instante, sem revisão e sem aviso. O hábito antigo era exatamente esse (`git tag -f v1 HEAD && git push --force origin v1`); ele funcionava porque só havia um caminho de deploy.
 
