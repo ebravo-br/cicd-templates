@@ -76,6 +76,8 @@ Exemplos:
 
 Fallback (branch sem padrão): `{versao}-B{run_number}`
 
+Componentes Python: a tag da imagem segue o formato acima, mas o `pyproject.toml` e o `uv.lock` recebem a forma PEP 440 `{versao}+b{run_number}.{tipo_letra_minuscula}{numero_issue}` (ex.: `1.52.0+b2.b55`), porque `1.52.0-B2-B55` não é uma versão Python válida e o build recusa o projeto. Tag Docker não aceita `+`, por isso as duas formas coexistem.
+
 ### Produção
 
 Bump do minor: `1.52.0` → `1.53.0`
