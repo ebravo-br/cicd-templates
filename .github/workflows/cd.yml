@@ -523,8 +523,8 @@ jobs:
             python)                CUR=$(grep -m1 -oP '^version *= *"\K[^"]+' "$VERSION_FILE") ;;
             *)                     CUR=$(node -p "require('./'+process.env.VERSION_FILE).version") ;;
           esac
-          # Strips both old (-SNAPSHOT.TIMESTAMP) and new (-B{N}-{L}{N}) pre-release suffixes
-          BASE=$(echo "$CUR" | sed -E 's/(-SNAPSHOT[._][0-9]+|-B[0-9]+(-[FBT][0-9]+)?)$//')
+          # Strips old (-SNAPSHOT.TIMESTAMP), new (-B{N}-{L}{N}) and python (+b{N}.{l}{N}) build suffixes
+          BASE=$(echo "$CUR" | sed -E 's/(-SNAPSHOT[._][0-9]+|-B[0-9]+(-[FBT][0-9]+)?|\+b[0-9]+(\.[fbt][0-9]+)?)$//')
           # Tudo que nao e producao (homologacao e desenvolvimento) ganha versao
           # de build. Antes o teste era `= homologacao`: um terceiro ambiente
           # caia no else e recebia o bump de minor de producao.
@@ -542,22 +542,34 @@ jobs:
             fi
             if [ -n "$TYPE_LETTER" ]; then
               NEW="${BASE}-B${RUN_NUMBER}-${TYPE_LETTER}${ISSUE_NUM}"
+              PY_NEW="${BASE}+b${RUN_NUMBER}.${TYPE_LETTER,,}${ISSUE_NUM}"
             else
               NEW="${BASE}-B${RUN_NUMBER}"
+              PY_NEW="${BASE}+b${RUN_NUMBER}"
             fi
           else
             IFS='.' read -r A B C <<<"$BASE"
             NEW="${A}.$((B+1)).0"
+            PY_NEW="$NEW"
           fi
+          # `new` e a tag da imagem e da release; `pkg` e o que vai para o
+          # arquivo de versao. So diferem em Python: `0.1.0-B123-F585` nao e
+          # PEP 440 e o hatchling/uv recusam o pyproject ("found `-F585`,
+          # which is not part of a valid version"), quebrando o build. A forma
+          # valida e a versao local `0.1.0+b123.f585`, que por sua vez nao
+          # serve de tag Docker (nao aceita `+`).
+          PKG="$NEW"
+          if [ "$TEC" = "python" ]; then PKG="$PY_NEW"; fi
           echo "current=$CUR" >> "$GITHUB_OUTPUT"
           echo "new=$NEW"     >> "$GITHUB_OUTPUT"
-          echo "::notice::$VERSION_FILE  $CUR -> $NEW  ($ENV_TARGET)"
+          echo "pkg=$PKG"     >> "$GITHUB_OUTPUT"
+          echo "::notice::$VERSION_FILE  $CUR -> $PKG  ($ENV_TARGET, imagem $NEW)"
 
       - name: Atualizar arquivo de versao
         env:
           VERSION_FILE: ${{ matrix.version_file }}
           TEC:          ${{ matrix.tecnologia }}
-          NEW:          ${{ steps.ver.outputs.new }}
+          NEW:          ${{ steps.ver.outputs.pkg }}
         run: |
           set -euo pipefail
           case "$TEC" in
@@ -591,6 +603,25 @@ jobs:
               # com outra chave `version` na coluna 0 (legal em TOML) teria
               # todas reescritas com a versao do projeto.
               sed -i -E "0,/^version *= *\"[^\"]+\"/s//version = \"${NEW}\"/" "$VERSION_FILE"
+              # O uv.lock guarda a versao do proprio projeto. Sem acompanhar o
+              # pyproject, `uv lock --check` falha e o primeiro `uv sync` local
+              # reescreve o lock. Edicao de texto, e nao `uv lock`, para nao
+              # re-resolver dependencias nem exigir uv no runner.
+              LOCK="$(dirname "$VERSION_FILE")/uv.lock"
+              if [ -f "$LOCK" ]; then
+                LOCK="$LOCK" python3 - <<'PY'
+          import os, re
+          fp = os.environ['LOCK']
+          src = open(fp).read()
+          novo, n = re.subn(
+              r'(\[\[package\]\]\nname = "[^"]+"\nversion = ")[^"]+("\nsource = \{ (?:editable|virtual) = "\." \})',
+              lambda m: m.group(1) + os.environ['NEW'] + m.group(2), src, count=1)
+          if n:
+              open(fp, 'w').write(novo)
+          else:
+              print('::warning::Pacote do projeto nao encontrado no uv.lock; arquivo nao alterado.')
+          PY
+              fi
               ;;
             *)
               node -e "const fs=require('fs'),f=process.env.VERSION_FILE;const j=JSON.parse(fs.readFileSync(f));j.version=process.env.NEW;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
@@ -632,7 +663,7 @@ jobs:
       # ---- Commit do bump via REST API (bypass branch protection) --------
       - name: Commit do bump na branch
         env:
-          NEW:           ${{ steps.ver.outputs.new }}
+          NEW:           ${{ steps.ver.outputs.pkg }}
           REF:           ${{ needs.setup.outputs.ref }}
           VERSION_FILE:  ${{ matrix.version_file }}
           TEC:           ${{ matrix.tecnologia }}
@@ -659,62 +690,73 @@ jobs:
           # URL-encode o ref para suportar branches com caracteres especiais (ex: feature/#1)
           ref_encoded = quote(ref, safe='/')
 
-          # Ler conteudo atual e SHA da branch via API
-          r = subprocess.run(
-              ['gh', 'api', f'repos/{repo}/contents/{vf}?ref={ref_encoded}'],
-              capture_output=True, check=True
-          )
-          data    = json.loads(r.stdout)
-          sha     = data['sha']
-          content = base64.b64decode(data['content']).decode('utf-8')
-
-          # Aplicar nova versao
-          if tec in ('spring-boot-java', 'java'):
-              # Troca apenas o <version> do PROJETO (cabecalho, fora de <parent> e de dependencias)
-              m_sec = re.search(r'<(?:properties|dependencies|dependencyManagement|build|profiles)[\s>]', content)
-              header_end = m_sec.start() if m_sec else len(content)
-              parent = re.search(r'<parent\b.*?</parent>', content, re.DOTALL)
-              pspan = (parent.start(), parent.end()) if parent else None
-              target = None
-              for vm in re.finditer(r'(<version>)([^<]+)(</version>)', content):
-                  if vm.start() >= header_end:
+          def bump_version_file(content):
+              if tec in ('spring-boot-java', 'java'):
+                  # Troca apenas o <version> do PROJETO (cabecalho, fora de <parent> e de dependencias)
+                  m_sec = re.search(r'<(?:properties|dependencies|dependencyManagement|build|profiles)[\s>]', content)
+                  header_end = m_sec.start() if m_sec else len(content)
+                  parent = re.search(r'<parent\b.*?</parent>', content, re.DOTALL)
+                  pspan = (parent.start(), parent.end()) if parent else None
+                  target = None
+                  for vm in re.finditer(r'(<version>)([^<]+)(</version>)', content):
+                      if vm.start() >= header_end:
+                          break
+                      if pspan and pspan[0] <= vm.start() < pspan[1]:
+                          continue
+                      target = vm
                       break
-                  if pspan and pspan[0] <= vm.start() < pspan[1]:
-                      continue
-                  target = vm
-                  break
-              if target is None:
-                  print('::error::Nao encontrei <version> do projeto no pom.xml.', file=sys.stderr)
-                  sys.exit(1)
-              updated = content[:target.start()] + target.group(1) + new + target.group(3) + content[target.end():]
-          elif tec == 'python':
-              # count=1 pelo mesmo motivo do sed acima.
-              updated = re.sub(r'^version *= *"[^"]*"', f'version = "{new}"', content, count=1, flags=re.MULTILINE)
-          else:
+                  if target is None:
+                      print('::error::Nao encontrei <version> do projeto no pom.xml.', file=sys.stderr)
+                      sys.exit(1)
+                  return content[:target.start()] + target.group(1) + new + target.group(3) + content[target.end():]
+              if tec == 'python':
+                  # count=1 pelo mesmo motivo do sed acima.
+                  return re.sub(r'^version *= *"[^"]*"', f'version = "{new}"', content, count=1, flags=re.MULTILINE)
               pkg = json.loads(content)
               pkg['version'] = new
-              updated = json.dumps(pkg, indent=2) + '\n'
+              return json.dumps(pkg, indent=2) + '\n'
 
-          if updated == content:
-              print('::notice::Versao ja atualizada, nada a commitar.')
-              sys.exit(0)
+          def bump_uv_lock(content):
+              # Mesma edicao do passo "Atualizar arquivo de versao".
+              return re.sub(
+                  r'(\[\[package\]\]\nname = "[^"]+"\nversion = ")[^"]+("\nsource = \{ (?:editable|virtual) = "\." \})',
+                  lambda m: m.group(1) + new + m.group(2), content, count=1)
 
-          # Commit via REST API — respeita admin bypass mesmo em branch protegida
-          payload = json.dumps({
-              'message': f'chore(release): bump {vf} -> {new} ({env}) [skip ci]',
-              'content': base64.b64encode(updated.encode('utf-8')).decode(),
-              'sha': sha,
-              'branch': ref
-          })
-          r2 = subprocess.run(
-              ['gh', 'api', '-X', 'PUT', f'repos/{repo}/contents/{vf}', '--input', '-'],
-              input=payload.encode(), capture_output=True
-          )
-          if r2.returncode != 0:
-              print(f'::error::Falha ao commitar bump: {r2.stderr.decode()}', file=sys.stderr)
-              sys.exit(1)
-          result = json.loads(r2.stdout)
-          print(f'::notice::Bump commitado: {result["commit"]["sha"][:8]} — {vf} -> {new} ({env})')
+          def commit(path, bump):
+              # Ler conteudo atual e SHA da branch via API
+              r = subprocess.run(
+                  ['gh', 'api', f'repos/{repo}/contents/{path}?ref={ref_encoded}'],
+                  capture_output=True, check=True
+              )
+              data    = json.loads(r.stdout)
+              content = base64.b64decode(data['content']).decode('utf-8')
+              updated = bump(content)
+              if updated == content:
+                  print(f'::notice::{path} ja atualizado, nada a commitar.')
+                  return
+              # Commit via REST API — respeita admin bypass mesmo em branch protegida.
+              # A Contents API grava um arquivo por commit: o uv.lock vira um
+              # segundo commit, tambem com [skip ci].
+              payload = json.dumps({
+                  'message': f'chore(release): bump {path} -> {new} ({env}) [skip ci]',
+                  'content': base64.b64encode(updated.encode('utf-8')).decode(),
+                  'sha': data['sha'],
+                  'branch': ref
+              })
+              r2 = subprocess.run(
+                  ['gh', 'api', '-X', 'PUT', f'repos/{repo}/contents/{path}', '--input', '-'],
+                  input=payload.encode(), capture_output=True
+              )
+              if r2.returncode != 0:
+                  print(f'::error::Falha ao commitar bump: {r2.stderr.decode()}', file=sys.stderr)
+                  sys.exit(1)
+              result = json.loads(r2.stdout)
+              print(f'::notice::Bump commitado: {result["commit"]["sha"][:8]} — {path} -> {new} ({env})')
+
+          commit(vf, bump_version_file)
+          lock = os.path.join(os.path.dirname(vf), 'uv.lock')
+          if tec == 'python' and os.path.isfile(lock):
+              commit(lock, bump_uv_lock)
           PY
 
       # ---- Credenciais AWS --------------------------------------------
